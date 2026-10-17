@@ -62,9 +62,17 @@ let initialMarkerSection = null, initialMarkerDisplay = null;
 let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
 let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
 let layoutPreviewTimer = null, layoutConflicts = [];
-const markerTypes = ['chest', 'relic', 'shop', 'stairs', 'other'];
-const markerTitles = { chest: 'Chests', relic: 'Relics', shop: 'Shops', stairs: 'Stairs', other: 'Other' };
-const markerIcon = type => `/icons/${markerTypes.includes(type) ? type : 'other'}.svg`;
+const builtInMarkerTypes = [
+  { id: 'chest', name: 'Chests', color: '#d89032', icon: 'chest', builtIn: true },
+  { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'relic', builtIn: true },
+  { id: 'shop', name: 'Shops', color: '#55ae70', icon: 'shop', builtIn: true },
+  { id: 'stairs', name: 'Stairs', color: '#57a9d6', icon: 'stairs', builtIn: true },
+  { id: 'other', name: 'Other', color: '#aab3ba', icon: 'other', builtIn: true }
+];
+const markerTypes = () => floorManifest?.markerTypes ?? builtInMarkerTypes;
+const markerType = id => markerTypes().find(type => type.id === id) ?? builtInMarkerTypes.find(type => type.id === id) ?? builtInMarkerTypes.at(-1);
+const markerIcon = id => `/icons/${markerType(id).icon}.svg`;
+const markerTitle = id => markerType(id).name;
 function setSaveStatus(state) {
   const target = document.querySelector('#save-status');
   if (!target) return;
@@ -442,7 +450,9 @@ function renderMarkers() {
     button.dataset.type = marker.type;
     button.style.left = `${marker.x * pixels}px`; button.style.top = `${marker.z * pixels}px`;
     button.style.backgroundImage = `url("${markerIcon(marker.type)}")`;
-    button.setAttribute('aria-label', `${markerTitles[marker.type] ?? marker.type}: ${marker.name}`);
+    button.style.setProperty('--marker-color', markerType(marker.type).color);
+    button.style.borderColor = markerType(marker.type).color;
+    button.setAttribute('aria-label', `${markerTitle(marker.type)}: ${marker.name}`);
     button.hidden = !editorOpen && highlightedMarker !== marker.id && !readMarkerVisibility(floorManifest.id, marker.type);
     button.title = marker.name;
     button.classList.toggle('highlighted', highlightedMarker === marker.id);
@@ -490,19 +500,27 @@ function renderMarkers() {
   const selectedSection = sectionSelect.value;
   sectionSelect.replaceChildren(...sections.map(section => new Option(section.name, section.id)));
   if (sections.some(section => section.id === selectedSection)) sectionSelect.value = selectedSection;
+  const typeSelect = document.querySelector('#marker-type'), selectedType = typeSelect.value;
+  typeSelect.replaceChildren(...markerTypes().map(type => new Option(type.name, type.id)));
+  if (markerTypes().some(type => type.id === selectedType)) typeSelect.value = selectedType;
+  renderCustomMarkerTypeEditor();
   const groups = document.querySelector('#legend-groups'); groups.replaceChildren();
-  for (const type of markerTypes) {
-    const typed = markers.filter(marker => marker.type === type);
+  pruneMarkerVisibility(floorManifest.id, markerTypes().map(type => type.id));
+  for (const type of markerTypes()) {
+    const typed = markers.filter(marker => marker.type === type.id);
     if (!typed.length) continue;
     const details = document.createElement('details'); details.open = true;
     const summary = document.createElement('summary');
-    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = readMarkerVisibility(floorManifest.id, type); check.setAttribute('aria-label', `Show ${markerTitles[type].toLowerCase()}`);
+    summary.style.color = type.color;
+    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = readMarkerVisibility(floorManifest.id, type.id); check.setAttribute('aria-label', `Show ${type.name.toLowerCase()}`);
     check.addEventListener('click', event => event.stopPropagation());
-    check.addEventListener('change', () => { storeMarkerVisibility(floorManifest.id, type, check.checked); layer.querySelectorAll(`[data-type="${type}"]`).forEach(item => item.hidden = !check.checked); });
-    summary.append(check, ` ${markerTitles[type]}`); details.append(summary);
+    check.addEventListener('change', () => { storeMarkerVisibility(floorManifest.id, type.id, check.checked); layer.querySelectorAll(`[data-type="${type.id}"]`).forEach(item => item.hidden = !check.checked); });
+    summary.append(check, ` ${type.name}`); details.append(summary);
     for (const marker of typed) {
       const entry = document.createElement('button'); entry.type = 'button'; entry.className = 'legend-entry';
-      const icon = document.createElement('img'); icon.src = markerIcon(type); icon.alt = '';
+      const icon = document.createElement('img'); icon.src = markerIcon(type.id); icon.alt = '';
+      icon.style.borderColor = type.color;
+      icon.style.border = `2px solid ${type.color}`;
       entry.append(icon, document.createTextNode(marker.name));
       entry.addEventListener('click', () => {
         if (editorOpen) { populateMarkerForm(marker); return; }
@@ -555,6 +573,72 @@ function readMarkerVisibility(floorId, type) {
 function storeMarkerVisibility(floorId, type, visible) {
   try { const key = `rr-marker-visibility:${floorId}`; const value = JSON.parse(localStorage.getItem(key) ?? '{}'); value[type] = visible; localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage may be disabled */ }
 }
+function pruneMarkerVisibility(_floorId, typeIds) {
+  try {
+    const valid = new Set(typeIds);
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith('rr-marker-visibility:')) continue;
+      const value = JSON.parse(localStorage.getItem(key) ?? '{}');
+      for (const id of Object.keys(value)) if (!valid.has(id)) delete value[id];
+      localStorage.setItem(key, JSON.stringify(value));
+    }
+  } catch { /* storage may be disabled or contain malformed preferences */ }
+}
+function renderCustomMarkerTypeEditor() {
+  const select = document.querySelector('#custom-marker-type-select');
+  if (!select) return;
+  const previous = select.value, customTypes = markerTypes().filter(type => !type.builtIn);
+  select.replaceChildren(new Option('New type', ''), ...customTypes.map(type => new Option(type.name, type.id)));
+  if (customTypes.some(type => type.id === previous)) select.value = previous;
+  const current = customTypes.find(type => type.id === select.value);
+  document.querySelector('#custom-marker-type-name').value = current?.name ?? '';
+  document.querySelector('#custom-marker-type-color').value = current?.color ?? '#d89032';
+  document.querySelector('#custom-marker-type-icon').value = current?.icon ?? 'other';
+  document.querySelector('#custom-marker-type-delete').hidden = !current;
+  const replacementLabel = document.querySelector('#custom-marker-type-replacement-label');
+  replacementLabel.hidden = !current;
+  const replacement = document.querySelector('#custom-marker-type-replacement'), existing = replacement.value;
+  replacement.replaceChildren(...markerTypes().filter(type => type.id !== current?.id).map(type => new Option(type.name, type.id)));
+  if ([...replacement.options].some(option => option.value === existing)) replacement.value = existing;
+  else replacement.value = 'other';
+}
+document.querySelector('#custom-marker-type-select').addEventListener('change', renderCustomMarkerTypeEditor);
+document.querySelector('#custom-marker-type-new').addEventListener('click', () => { document.querySelector('#custom-marker-type-select').value = ''; renderCustomMarkerTypeEditor(); });
+document.querySelector('#custom-marker-type-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const select = document.querySelector('#custom-marker-type-select'), id = select.value;
+  const status = document.querySelector('#custom-marker-type-status');
+  const type = { name: document.querySelector('#custom-marker-type-name').value, color: document.querySelector('#custom-marker-type-color').value, icon: document.querySelector('#custom-marker-type-icon').value };
+  const response = await fetch(id ? `/api/project/marker-types/${encodeURIComponent(id)}` : '/api/project/marker-types', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, type }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision;
+  status.textContent = result.saved ? 'Marker type saved.' : `Type saved locally; ${result.warning}. Use Save to retry.`;
+  const selectedId = result.type?.id ?? id;
+  if (result.saved) { await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); document.querySelector('#custom-marker-type-select').value = selectedId; renderCustomMarkerTypeEditor(); }
+});
+document.querySelector('#custom-marker-type-delete').addEventListener('click', async () => {
+  const id = document.querySelector('#custom-marker-type-select').value;
+  const replacementType = document.querySelector('#custom-marker-type-replacement').value;
+  if (!id || !replacementType || !window.confirm('Delete this type and move its markers to the selected replacement?')) return;
+  const status = document.querySelector('#custom-marker-type-status');
+  const response = await fetch(`/api/project/marker-types/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, replacementType }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; status.textContent = result.saved ? 'Marker type deleted.' : `Type deleted locally; ${result.warning}. Use Save to retry.`;
+  if (result.saved) { await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); document.querySelector('#custom-marker-type-select').value = ''; renderCustomMarkerTypeEditor(); }
+});
+async function markerTypeHistoryCommand(direction) {
+  const status = document.querySelector('#custom-marker-type-status');
+  const response = await fetch(`/api/project/marker-types/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; status.textContent = `Marker type ${direction} complete.`;
+  if (result.saved) { await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+}
+document.querySelector('#marker-type-undo').addEventListener('click', () => void markerTypeHistoryCommand('undo'));
+document.querySelector('#marker-type-redo').addEventListener('click', () => void markerTypeHistoryCommand('redo'));
 function centerMarker(marker) {
   if (!image.naturalWidth) { pendingCenterMarker = marker; return; }
   const pixels = floorManifest.renderer?.pixelSize ?? 16;
