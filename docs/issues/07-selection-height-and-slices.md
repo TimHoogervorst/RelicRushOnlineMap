@@ -1,6 +1,6 @@
 # 07 — Move block selections and inspect lower heights
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -25,5 +25,14 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implemented the following behavior:
+
+- Shift-click toggles a multi-block selection, with a visible selection outline and selected Y range. The height slider requests a private rendered preview of blocks at or below its value; it filters only the preview snapshot and never changes project data. Clicking at a lower slice selects the top block at that slice, including blocks hidden by higher layers.
+- Ordinary wheel zoom remains intact. Alt + wheel changes a whole-block vertical move proposal; the source selection, proposed Y range and preview outline stay visible until the owner commits or cancels.
+- `POST /api/project/block-moves` moves a selection in one SQLite transaction/revision, allows destinations occupied by the selection itself, rejects outside collisions, relocates block entities, updates expanded bounds, and regenerates the saved floor. The operation is one undo/redo history command.
+- Section placement and label anchors remain unchanged; marker coordinates remain section-local. The existing project database stores all moved geometry, so reopening reads the new chunk positions.
+
+Verification on the ticket branch: `npm.cmd test` (35/35 passing), `npm.cmd run typecheck`, with focused fixture coverage for a real block entity and empty-above-cell move; storage tests cover negative Y, chunk edges, overlapping source/destination cells, collision rollback, and preserving anchors. Authenticated route tests cover slice preview without project mutation and move/save/undo/redo persistence.
+
+The browser interaction and Docker Engine acceptance checks remain open, so this ticket stays in progress. No storage coordinate contract changed; the API adds the authenticated `/api/project/preview` GET and `/api/project/block-moves` POST endpoints.
 
