@@ -20,8 +20,13 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #map-frame.dragging { cursor: grabbing; }
 #map { display: block; image-rendering: pixelated; max-width: none; box-shadow: 0 22px 60px #0009; border: 1px solid #697267; }
 #block-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+#section-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+#section-label-layer { position: absolute; inset: 0; pointer-events: none; }
+.section-label { position: absolute; z-index: 1; width: auto; min-width: 34px; height: 26px; padding: 2px 7px; transform: translate(-50%,-50%); color: #f0e9ce; background: #17211ee8; border: 1px solid #c7a969; border-radius: 4px; box-shadow: 0 2px 8px #000b; font: 10px 'DM Mono', monospace; white-space: nowrap; pointer-events: auto; touch-action: none; }
+.section-label.selected { outline: 2px solid #e5cb7c; outline-offset: 2px; }
 .block-selection-cell { fill: #d8f28a55; stroke: #e7ff9a; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .block-selection-proposed { fill: #65e5b044; stroke: #74f3c1; stroke-width: 2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; }
+.layout-conflict { fill: #ff365777; stroke: #ff3447; stroke-width: 2; vector-effect: non-scaling-stroke; }
 #block-selection-status { min-height: 22px; padding: 7px; background: #202825; border-radius: 5px; color: #d5e2cb; font: 11px 'DM Mono', monospace; }
 #message { position: absolute; inset: 0; display: grid; place-items: center; margin: auto; color: #b4bcae; font-size: 13px; text-align: center; padding: 30px; pointer-events: none; }
 #message[hidden] { display: none; }

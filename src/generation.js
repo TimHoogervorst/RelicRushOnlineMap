@@ -53,7 +53,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
             throw new Error(`Renderer produced invalid PNG output for floor ${floor.name}.`);
           }
-          floors.push({ id: floor.id, name: floor.name, image: output, sections: floor.sections, markers: floor.markers ?? [], ...rendered });
+          floors.push({ id: floor.id, name: floor.name, image: output, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], ...rendered });
         }
         progress('Writing revision snapshot', 90);
         const manifest = { manifestVersion: 1, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };

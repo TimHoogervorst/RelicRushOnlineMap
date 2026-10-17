@@ -171,10 +171,11 @@ export function snapshotProject(db) {
     for (const section of sections) { section.placementX -= minX; section.placementZ -= minZ; }
     const markers = db.prepare(`SELECT m.id,m.section_id AS sectionId,m.type,m.name,m.description,m.x,m.z,m.stair_destination_id AS stairDestinationId,s.placement_x AS sectionX,s.placement_z AS sectionZ FROM markers m JOIN sections s ON s.id=m.section_id WHERE s.floor_id=? ORDER BY m.id`).all(floor.id).map(marker => ({
       id: marker.id, sectionId: marker.sectionId, type: marker.type, name: marker.name, description: marker.description,
-      x: marker.x + marker.sectionX - minX, z: marker.z + marker.sectionZ - minZ,
+      x: sectionLocalToFloor({ placementX: marker.sectionX, placementZ: marker.sectionZ }, { x: marker.x, z: marker.z }, { x: minX, z: minZ }).x,
+      z: sectionLocalToFloor({ placementX: marker.sectionX, placementZ: marker.sectionZ }, { x: marker.x, z: marker.z }, { x: minX, z: minZ }).z,
       localX: marker.x, localZ: marker.z, stairDestinationId: marker.stairDestinationId
     }));
-    return { ...floor, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers };
+    return { ...floor, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers };
   }) };
 }
 
@@ -372,6 +373,85 @@ function applyBlockMove(db, sectionId, from, to, expectedRevision) {
 export function restoreBlock(db, command, direction, expectedRevision) {
   const target = direction === 'undo' ? command.before : command.after;
   return saveBlock(db, { sectionId: command.sectionId, x: command.x, y: command.y, z: command.z, state: target && { id: target.id, properties: target.properties }, blockEntities: target?.blockEntities ?? [] }, expectedRevision);
+}
+
+function readSectionLayout(db, sectionId) {
+  const row = db.prepare('SELECT id,floor_id AS floorId,placement_x AS placementX,placement_z AS placementZ,label_x AS labelX,label_z AS labelZ FROM sections WHERE id=?').get(sectionId);
+  if (!row) throw new Error('Choose an existing owning section.');
+  return row;
+}
+
+/** Convert a section-local anchor (marker, label or future connection endpoint) to the saved floor frame. */
+export function sectionLocalToFloor(section, point, origin = { x: 0, z: 0 }) {
+  return { x: point.x + section.placementX - origin.x, y: point.y, z: point.z + section.placementZ - origin.z };
+}
+
+/** Convert a saved floor-frame anchor back to section-local coordinates. */
+export function floorToSectionLocal(section, point, origin = { x: 0, z: 0 }) {
+  return { x: point.x - section.placementX + origin.x, y: point.y, z: point.z - section.placementZ + origin.z };
+}
+
+function inspectSectionLayout(db, sectionId, placementX, placementZ) {
+  const current = readSectionLayout(db, sectionId);
+  const offsets = [placementX, placementZ];
+  if (!offsets.every(value => Number.isSafeInteger(value) && Math.abs(value) <= 1_000_000)) throw new Error('Section placement offsets must be whole block coordinates within the supported range.');
+  const blocks = readSectionBlocks(db, sectionId);
+  const others = db.prepare('SELECT id,placement_x AS placementX,placement_z AS placementZ FROM sections WHERE floor_id=? AND id<>?').all(current.floorId, sectionId);
+  const otherByCell = new Map();
+  for (const other of others) for (const block of readSectionBlocks(db, other.id)) {
+    const key = `${other.placementX + block.x},${block.y},${other.placementZ + block.z}`;
+    const state = `${block.id}|${JSON.stringify(block.properties ?? {})}`;
+    if (!otherByCell.has(key)) otherByCell.set(key, new Set());
+    otherByCell.get(key).add(state);
+  }
+  const conflicts = [];
+  for (const block of blocks) {
+    const key = `${placementX + block.x},${block.y},${placementZ + block.z}`;
+    const state = `${block.id}|${JSON.stringify(block.properties ?? {})}`;
+    const occupied = otherByCell.get(key);
+    if (occupied && [...occupied].some(otherState => otherState !== state)) conflicts.push({ x: placementX + block.x, y: block.y, z: placementZ + block.z });
+  }
+  return { current, conflicts };
+}
+
+export function sectionLayoutConflicts(db, { sectionId, placementX, placementZ }) {
+  return inspectSectionLayout(db, sectionId, placementX, placementZ).conflicts;
+}
+
+function validateSectionLayout(db, sectionId, placementX, placementZ) {
+  const { current, conflicts } = inspectSectionLayout(db, sectionId, placementX, placementZ);
+  if (conflicts.length) throw new Error(`Section placement collision at ${conflicts.slice(0, 8).map(cell => `${cell.x},${cell.y},${cell.z}`).join('; ')}.`);
+  return current;
+}
+
+/** Move a whole section in the floor frame while preserving section-local geometry and anchors. */
+export function setSectionLayout(db, { sectionId, placementX, placementZ, labelX, labelZ }, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (![labelX ?? 0, labelZ ?? 0].every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) throw new Error('Section label coordinates must be finite local block coordinates.');
+  const current = validateSectionLayout(db, sectionId, placementX, placementZ);
+  const nextLabelX = labelX ?? current.labelX, nextLabelZ = labelZ ?? current.labelZ;
+  if (current.placementX === placementX && current.placementZ === placementZ && current.labelX === nextLabelX && current.labelZ === nextLabelZ) throw new Error('Section layout is unchanged.');
+  const tx = db.transaction(() => {
+    const result = db.prepare('UPDATE sections SET placement_x=?,placement_z=?,label_x=?,label_z=? WHERE id=?').run(placementX, placementZ, nextLabelX, nextLabelZ, sectionId);
+    if (result.changes !== 1) throw new Error('Section does not exist.');
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { sectionId, before: current, after: { ...current, placementX, placementZ, labelX: nextLabelX, labelZ: nextLabelZ }, revision: expectedRevision + 1 };
+}
+
+export function restoreSectionLayout(db, command, direction, expectedRevision) {
+  if (direction !== 'undo' && direction !== 'redo') throw new Error('Choose undo or redo.');
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const target = direction === 'undo' ? command.before : command.after;
+  if (!target) throw new Error('Invalid section layout history.');
+  const current = validateSectionLayout(db, command.sectionId, target.placementX, target.placementZ);
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE sections SET placement_x=?,placement_z=?,label_x=?,label_z=? WHERE id=?').run(target.placementX, target.placementZ, target.labelX, target.labelZ, command.sectionId);
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { sectionId: command.sectionId, before: current, after: target, revision: expectedRevision + 1 };
 }
 
 /** Persist one decoded schematic as an independent section in a shared schematic coordinate frame. */

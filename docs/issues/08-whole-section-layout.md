@@ -1,6 +1,6 @@
 # 08 — Arrange entire sections with their markers and labels
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -25,5 +25,9 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implemented section placement fields were already present in SQLite; this slice now adds revisioned layout updates and undo/redo, an editor section selector with whole-block snapped dragging from the label handle, numeric floor placement offsets, and editable section-local label anchors. Section-local geometry and marker coordinates remain unchanged. Snapshot manifests transform blocks, markers, and labels through the section placement and a recomputed floor coordinate origin; consumers can use `sectionLocalToFloor` and `floorToSectionLocal` for future connection endpoints. Layout commits validate occupied cells server-side, highlight conflicts in the preview, reject different block states, and allow empty or identical-state overlap. Successful commits regenerate the floor release and update fit bounds.
+
+Verification: `npm.cmd test` passes 39/39; `npm.cmd run typecheck` passes; `git diff --check` passes. Tests cover nonzero placement with chest and stairs anchors, local label edits, collision rollback and preview, empty/identical overlap, undo/redo, coordinate transform round trips, regenerated visitor manifests, and reopening after server restart.
+
+Remaining acceptance gate: Docker Engine and an interactive browser session were unavailable during this slice, so the UI drag and real Docker runtime still need manual acceptance. No database schema migration was needed because placement and label columns were already included in the current integration base.
 
