@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Relic Rush Map</title>
+    <link rel="stylesheet" href="/map.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="brand"><span class="mark">RR</span><div><strong>Relic Rush</strong><small>Dungeon map</small></div></div>
+      <label class="floor-picker">Floor <select id="floor"><option value="floor-0">Floor 0</option></select></label>
+      <div class="actions"><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit floor</button></div>
+    </header>
+    <main id="viewport" aria-label="Dungeon map viewport">
+      <div id="map-frame"><img id="map" alt="Overhead view of the starting dungeon area" draggable="false" hidden /></div>
+      <section id="message" role="status">Loading map…</section>
+      <div class="map-caption" id="caption">Starting Area · Floor 0</div>
+    </main>
+    <script type="module" src="/viewer.js"></script>
+  </body>
+</html>

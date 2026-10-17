@@ -1,0 +1,17 @@
+services:
+  map:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      MINECRAFT_CLIENT_JAR: /seed-assets/minecraft-client.jar
+      EDITOR_PASSWORD: ${EDITOR_PASSWORD:-relic-local}
+    volumes:
+      - map-data:/data
+      - ./assets:/seed-assets:ro
+    restart: unless-stopped
+
+volumes:
+  map-data:
