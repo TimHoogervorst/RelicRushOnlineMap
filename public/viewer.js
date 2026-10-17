@@ -57,7 +57,7 @@ function endPointer(event) { if (pointer?.id === event.pointerId) { const click 
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
 image.addEventListener('load', () => { if (!slicePreviewActive) fitFloor(); if (pendingCenterMarker) { const target = pendingCenterMarker; pendingCenterMarker = null; centerMarker(target); } renderSelection(); });
 
-let editorOpen = false, editorAuthenticated = false, sidebarOpen = true, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null, pendingCenterMarker = null;
+let editorOpen = false, editorAuthenticated = false, sidebarOpen = !window.matchMedia('(max-width: 600px)').matches, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null, pendingCenterMarker = null;
 let initialMarkerSection = null, initialMarkerDisplay = null;
 let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
 let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
@@ -300,6 +300,7 @@ function renderSidebar() {
   document.querySelector('#sidebar-reopen').hidden = sidebarOpen;
   legendPanel.hidden = false;
   editorPanel.hidden = !editorOpen;
+  document.querySelector('#sidebar-heading-title').textContent = editorOpen ? 'Editing tools' : 'Legend';
   const modeButton = document.querySelector('#edit-mode');
   modeButton.textContent = editorOpen ? 'Done editing' : 'Edit';
   modeButton.setAttribute('aria-pressed', String(editorOpen));
@@ -991,6 +992,7 @@ document.querySelector('#import-schematic').addEventListener('click', async () =
 });
 document.querySelector('#save-project').addEventListener('click', saveProject);
 renderSidebar();
+new ResizeObserver(() => fitFloor()).observe(viewport);
 
 try {
   const response = await fetch('/api/map/manifest', { cache: 'no-store' });

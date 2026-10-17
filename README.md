@@ -23,6 +23,8 @@ Project SQLite state and immutable render releases live in the named `map-data` 
 
 For host development, use Node.js 22 LTS and run `npm ci`, then `npm run typecheck`, `npm test`, and `npm start`. The typed renderer contract is in `src/renderer-adapter.ts`; Node 22's type stripping executes that narrow boundary while the worker and raster backend remain JavaScript. Set `DATA_DIR`, `MINECRAFT_CLIENT_JAR`, or `MINECRAFT_ASSETS` to use alternate locations. The initial import and rendering run in a worker thread, outside HTTP request handling.
 
+See [Operations](docs/operations.md) for persistent asset setup, adding floors and sections, editing and save behavior, supported limits, portable backup and restore, data-volume migration, and HTTPS reverse-proxy configuration. Compose passes `TRUST_PROXY` and `COOKIE_SECURE` through to the app.
+
 ## Rendering and coordinate contract
 
 - Stored block and marker coordinates are section-local integer `(x, y, z)` coordinates. Image rows are reversed Z, but this transform stays inside the renderer/viewer and is never stored in project data.
