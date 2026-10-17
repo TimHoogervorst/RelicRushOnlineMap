@@ -1,6 +1,6 @@
 # Implementation tickets
 
-Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Ticket 01 remains in progress. Ticket 02 has an integrated implementation but remains in progress pending runtime/browser acceptance; later tickets remain blocked by their listed dependencies.
+Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01–05 have integrated implementation work and remain in progress pending their listed acceptance checks; later tickets remain blocked by dependencies.
 
 The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSARY.md) are authoritative. These tickets represent vertical slices: every feature includes storage, API, UI and focused verification as applicable. Each can be demonstrated after its blockers are complete. Ticket numbers are local identifiers.
 
@@ -10,8 +10,8 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 | --- | --- | --- | --- |
 | [01 — Render the real starting map in Docker](01-render-starting-map-in-docker.md) | A visitor can open the supplied starting area as a textured overhead map. | In progress | — |
 | [02 — Unlock editing and configure Minecraft assets](02-login-and-asset-setup.md) | The owner can log in, open editing tools, and supply persistent rendering assets. | In progress | 01 |
-| [03 — Import a schematic into a saved floor and section](03-import-sections-and-floors.md) | The owner can add dungeon areas without retaining their source schematic. | Blocked | 02 |
-| [04 — Keep saves consistent during rendering and failures](04-reliable-save-and-refresh.md) | The owner can keep editing while saves run, and visitors always receive a complete saved map. | Blocked | 03 |
+| [03 — Import a schematic into a saved floor and section](03-import-sections-and-floors.md) | The owner can add dungeon areas without retaining their source schematic. | In progress | 02 |
+| [04 — Keep saves consistent during rendering and failures](04-reliable-save-and-refresh.md) | The owner can keep editing while saves run, and visitors always receive a complete saved map. | In progress | 03 |
 | [05 — Place markers and browse a grouped legend](05-markers-and-grouped-legend.md) | The owner can maintain points of interest; visitors can find and filter them. | In progress | 04 |
 | [06 — Edit individual blocks with a block palette](06-single-block-editing.md) | The owner can make small geometry corrections directly in the map. | Blocked | 04 |
 | [07 — Move block selections and inspect lower heights](07-selection-height-and-slices.md) | The owner can adjust several blocks together and reach geometry hidden beneath upper blocks. | Blocked | 06 |
