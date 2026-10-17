@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../src/server.js';
-import { encodeSectionChunks, importSchematicSection, moveSectionBlocks, openProject, projectRevision, readSectionBlock, readSectionBlocks, saveBlock, snapshotProject } from '../src/project-store.js';
+import { encodeSectionChunks, floorToSectionLocal, importSchematicSection, moveSectionBlocks, openProject, projectRevision, readSectionBlock, readSectionBlocks, saveBlock, sectionLocalToFloor, setSectionLayout, snapshotProject } from '../src/project-store.js';
 import { decodeLitematic } from '../src/litematic.js';
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1]);
@@ -19,6 +19,96 @@ function sectionDb(path = ':memory:') {
   db.prepare("UPDATE project_meta SET value='1' WHERE key='revision'").run();
   return db;
 }
+
+test('whole-section placement preserves local geometry and anchors, rejects occupied collisions, and survives reopen', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rr-layout-'));
+  const file = path.join(directory, 'project.sqlite');
+  let db = sectionDb(file);
+  try {
+    db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run('section-2', 'floor-1', 'East', JSON.stringify({ x: 4, y: 4, z: 4 }), 8, 0, '{}');
+    const otherChunk = encodeSectionChunks([{ x: 0, y: 0, z: 0, id: 'minecraft:stone', properties: {} }])[0];
+    db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,1,?)').run('section-2', 0, 0, 0, otherChunk.compressed);
+    db.prepare('INSERT INTO markers(id,section_id,type,name,x,z) VALUES(?,?,?,?,?,?)').run('ordinary', 'section-2', 'chest', 'Cache', 1.5, 1.5);
+    db.prepare('INSERT INTO markers(id,section_id,type,name,x,z) VALUES(?,?,?,?,?,?)').run('stairs', 'section-2', 'stairs', 'Stairs', 2.5, 1.5);
+    const before = snapshotProject(db).floors[0];
+    assert.equal(setSectionLayout(db, { sectionId: 'section-2', placementX: 12, placementZ: -3, labelX: 2.25, labelZ: 1.75 }, 1).revision, 2);
+    const after = snapshotProject(db).floors[0];
+    const section = after.sections.find(item => item.id === 'section-2');
+    assert.deepEqual([section.placementX, section.placementZ, section.labelX, section.labelZ], [12, 0, 2.25, 1.75]);
+    assert.deepEqual([db.prepare('SELECT placement_x,placement_z FROM sections WHERE id=?').get('section-2').placement_x, db.prepare('SELECT placement_z FROM sections WHERE id=?').get('section-2').placement_z], [12, -3]);
+    assert.equal(readSectionBlocks(db, 'section-2')[0].id, 'minecraft:stone');
+    assert.deepEqual(after.markers.filter(item => item.sectionId === 'section-2').map(item => [item.localX, item.localZ]).sort(), [[1.5, 1.5], [2.5, 1.5]]);
+    assert.equal(after.markers.find(item => item.id === 'ordinary').x, 13.5 - Math.min(0, ...after.sections.map(item => item.placementX)));
+    assert.throws(() => setSectionLayout(db, { sectionId: 'section-1', placementX: 12, placementZ: -3 }, 2), /collision/i);
+    assert.equal(projectRevision(db), 2);
+    db.close(); db = openProject(file);
+    const reopened = snapshotProject(db).floors[0].sections.find(item => item.id === 'section-2');
+    assert.deepEqual([reopened.placementX, reopened.placementZ, reopened.labelX, reopened.labelZ], [12, 0, 2.25, 1.75]);
+    assert.deepEqual([db.prepare('SELECT placement_x,placement_z FROM sections WHERE id=?').get('section-2').placement_x, db.prepare('SELECT placement_z FROM sections WHERE id=?').get('section-2').placement_z], [12, -3]);
+  } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('whole-section placement allows empty overlap and exactly identical occupied overlap', () => {
+  const db = sectionDb();
+  try {
+    db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run('empty', 'floor-1', 'Empty', JSON.stringify({ x: 4, y: 4, z: 4 }), 12, 0, '{}');
+    assert.equal(setSectionLayout(db, { sectionId: 'empty', placementX: 0, placementZ: 0 }, 1).revision, 2);
+    db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run('same', 'floor-1', 'Same block', JSON.stringify({ x: 4, y: 4, z: 4 }), 12, 0, '{}');
+    const chest = { x: 0, y: 0, z: 0, id: 'minecraft:chest', properties: { facing: 'north', type: 'single', waterlogged: 'false' } };
+    const chunk = encodeSectionChunks([chest])[0];
+    db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,1,?)').run('same', 0, 0, 0, chunk.compressed);
+    assert.equal(setSectionLayout(db, { sectionId: 'same', placementX: 0, placementZ: 0 }, 2).revision, 3);
+  } finally { db.close(); }
+});
+
+test('section anchor transforms round-trip for markers, labels, and future connection endpoints', () => {
+  const section = { placementX: 18, placementZ: -7 }, origin = { x: -3, z: -12 }, local = { x: 4.5, y: -2, z: 9.5 };
+  assert.deepEqual(floorToSectionLocal(section, sectionLocalToFloor(section, local, origin), origin), local);
+});
+
+test('section layout API regenerates transformed anchors, rejects collisions, supports undo/redo and persists through restart', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-section-layout-route-'));
+  const db = sectionDb(path.join(dataDir, 'project.sqlite'));
+  db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run('section-2', 'floor-1', 'East', JSON.stringify({ x: 4, y: 4, z: 4 }), 8, 0, '{}');
+  const chunk = encodeSectionChunks([{ x: 0, y: 0, z: 0, id: 'minecraft:stone', properties: {} }])[0];
+  db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,1,?)').run('section-2', 0, 0, 0, chunk.compressed);
+  db.prepare('INSERT INTO markers(id,section_id,type,name,x,z) VALUES(?,?,?,?,?,?)').run('room-marker', 'section-2', 'chest', 'Cache', 1.5, 1.5);
+  db.prepare('INSERT INTO markers(id,section_id,type,name,x,z) VALUES(?,?,?,?,?,?)').run('stair-marker', 'section-2', 'stairs', 'Downstairs', 2.5, 1.5);
+  db.close();
+  let renders = 0;
+  const renderer = { async render({ output, schematic }) { renders++; await writeFile(output, png); return { width: schematic.dimensions.x * 16, height: schematic.dimensions.z * 16, bounds: { width: schematic.dimensions.x, depth: schematic.dimensions.z }, renderer: { pixelSize: 16 } }; } };
+  let app = createApp({ dataDir, password: 'secret', initializeWorker: false, renderer });
+  let { server, origin } = await listen(app);
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(dataDir, { recursive: true, force: true }); });
+  const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
+  const headers = { cookie: login.headers.get('set-cookie').split(';')[0], origin, 'content-type': 'application/json' };
+  assert.equal((await fetch(`${origin}/api/generation/save`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1 }) })).status, 200);
+  const saveLayout = (expectedRevision, placementX, placementZ) => fetch(`${origin}/api/project/sections/section-2/layout`, { method: 'PUT', headers, body: JSON.stringify({ expectedRevision, placementX, placementZ, labelX: 2.25, labelZ: 1.75 }) });
+  const moved = await saveLayout(1, 12, -3);
+  assert.equal(moved.status, 200, (await moved.clone().json()).error);
+  assert.equal((await moved.json()).revision, 2);
+  assert.equal(renders, 2, 'layout commits regenerate the entire affected floor image');
+  const manifest = await fetch(`${origin}/api/map/manifest?floor=floor-1`, { cache: 'no-store' }).then(response => response.json());
+  const movedSection = manifest.sections.find(section => section.id === 'section-2');
+  assert.deepEqual([movedSection.labelX, movedSection.labelZ], [2.25, 1.75]);
+  assert.deepEqual(manifest.markers.filter(marker => marker.sectionId === 'section-2').map(marker => [marker.localX, marker.localZ, marker.x, marker.z]).sort((a,b) => a[0]-b[0]), [[1.5,1.5,13.5,1.5],[2.5,1.5,14.5,1.5]]);
+  const preview = await fetch(`${origin}/api/project/sections/section-1/layout-preview?placementX=12&placementZ=-3`, { headers }).then(response => response.json());
+  assert.deepEqual(preview.conflicts, [{ x: 12, y: 0, z: -3 }]);
+  const collision = await fetch(`${origin}/api/project/sections/section-1/layout`, { method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 2, placementX: 12, placementZ: -3, labelX: 0, labelZ: 0 }) });
+  assert.equal(collision.status, 409);
+  assert.match((await collision.json()).error, /collision/i);
+  const undo = await fetch(`${origin}/api/project/sections/layout/undo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 2 }) });
+  assert.equal(undo.status, 200, (await undo.clone().json()).error); assert.equal((await undo.json()).revision, 3);
+  const redo = await fetch(`${origin}/api/project/sections/layout/redo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 3 }) });
+  assert.equal(redo.status, 200, (await redo.clone().json()).error); assert.equal((await redo.json()).revision, 4);
+  await new Promise(resolve => server.close(resolve));
+  ({ server, origin } = await listen(createApp({ dataDir, password: 'secret', initializeWorker: false, renderer })));
+  t.after(async () => new Promise(resolve => server.close(resolve)));
+  const afterRestart = await fetch(`${origin}/api/map/manifest?floor=floor-1`, { cache: 'no-store' }).then(response => response.json());
+  assert.equal(afterRestart.projectRevision, 4);
+  assert.deepEqual([afterRestart.sections.find(section => section.id === 'section-2').labelX, afterRestart.sections.find(section => section.id === 'section-2').placementZ], [2.25, 0]);
+  assert.deepEqual(afterRestart.markers.map(marker => marker.name).sort(), ['Cache', 'Downstairs']);
+});
 
 test('group block move is atomic across negative Y and chunk boundaries and carries block entities', () => {
   const db = sectionDb();

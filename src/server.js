@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +30,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const sessions = new Map(), failures = new Map();
   const markerHistory = new Map();
   const blockHistory = new Map();
+  const sectionHistory = new Map();
   const rememberMarker = (token, command) => {
     const history = markerHistory.get(token) ?? { undo: [], redo: [] };
     history.undo.push(command);
@@ -81,7 +82,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -146,6 +147,46 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       const section = db.prepare('SELECT id,name,bounds_json,placement_x AS placementX,placement_z AS placementZ FROM sections WHERE id=?').get(req.params.id);
       if (!section) return res.status(404).json({ error: 'Section does not exist.' });
       res.json({ revision: projectRevision(db), section: { ...section, bounds: JSON.parse(section.bounds_json) }, blocks: readSectionBlocks(db, section.id) });
+    } finally { db.close(); }
+  });
+
+  app.put('/api/project/sections/:id/layout', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const { expectedRevision, placementX, placementZ, labelX, labelZ } = req.body ?? {};
+      if (!Number.isSafeInteger(expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = setSectionLayout(db, { sectionId: req.params.id, placementX, placementZ, labelX, labelZ }, expectedRevision);
+      const token = getSession(req).token, history = sectionHistory.get(token) ?? { undo: [], redo: [] };
+      history.undo.push(result); if (history.undo.length > 50) history.undo.shift(); history.redo = []; sectionHistory.set(token, history);
+      try { const saved = await generation.save(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning section|collision/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.get('/api/project/sections/:id/layout-preview', requireEditor, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const placementX = Number(req.query.placementX), placementZ = Number(req.query.placementZ);
+      res.json({ conflicts: sectionLayoutConflicts(db, { sectionId: req.params.id, placementX, placementZ }) });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+    finally { db.close(); }
+  });
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/sections/layout/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const token = getSession(req).token, history = sectionHistory.get(token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'], command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no section layout edit to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = restoreSectionLayout(db, command, direction, req.body.expectedRevision);
+      source.pop(); target.push(command); sectionHistory.set(token, history);
+      try { const saved = await generation.save(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|collision|history/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });
   app.get('/api/project/preview', requireEditor, async (req, res) => {

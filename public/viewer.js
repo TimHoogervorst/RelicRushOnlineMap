@@ -33,7 +33,7 @@ viewport.addEventListener('wheel', event => {
   }
   setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
 }, { passive: false });
-viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
+viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, .section-label, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
 viewport.addEventListener('pointermove', event => { if (!pointer || pointer.id !== event.pointerId) return; if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 4) pointer.moved = true; offsetX += event.clientX - pointer.x; offsetY += event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; drawTransform(); });
 function endPointer(event) { if (pointer?.id === event.pointerId) { const click = !pointer.moved, target = pointer.target, shiftKey = pointer.shiftKey; pointer = null; frame.classList.remove('dragging'); if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY, shiftKey); } }
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
@@ -43,6 +43,7 @@ let editorOpen = false, editorAuthenticated = false, sidebarOpen = true, project
 let initialMarkerSection = null, initialMarkerDisplay = null;
 let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
 let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
+let layoutPreviewTimer = null, layoutConflicts = [];
 const markerTypes = ['chest', 'relic', 'shop', 'stairs', 'other'];
 const markerTitles = { chest: 'Chests', relic: 'Relics', shop: 'Shops', stairs: 'Stairs', other: 'Other' };
 const markerIcon = type => `/icons/${markerTypes.includes(type) ? type : 'other'}.svg`;
@@ -85,7 +86,114 @@ async function loadFloor(floorId) {
   const sections = (floorManifest.sections ?? []).map(section => section.name).join(' · ');
   document.querySelector('#caption').textContent = `${sections || floorManifest.name} · ${floorManifest.name} · ${floorManifest.bounds.width} × ${floorManifest.bounds.depth}`;
   renderMarkers();
+  renderSectionLabels();
+  renderLayoutConflicts();
 }
+
+function renderSectionLabels() {
+  if (!floorManifest) return;
+  const layer = document.querySelector('#section-label-layer');
+  layer.querySelectorAll('.section-label').forEach(label => label.remove());
+  const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1;
+  const selector = document.querySelector('#layout-section');
+  const previous = selector.value;
+  selector.replaceChildren(...(floorManifest.sections ?? []).map(section => new Option(section.name, section.id)));
+  if ((floorManifest.sections ?? []).some(section => section.id === previous)) selector.value = previous;
+  else if (selector.options.length) selector.selectedIndex = 0;
+  const selectedId = selector.value;
+  for (const section of floorManifest.sections ?? []) {
+    const label = document.createElement('button'); label.type = 'button'; label.className = `section-label${section.id === selectedId ? ' selected' : ''}`; label.dataset.sectionId = section.id; label.textContent = section.name;
+    label.style.left = `${(section.placementX + section.labelX) * pixels}px`;
+    label.style.top = `${(depth - 1 - section.placementZ - section.labelZ) * pixels}px`;
+    label.title = 'Drag to move this whole section in snapped blocks';
+    label.addEventListener('click', event => { event.stopPropagation(); selector.value = section.id; renderSectionLabels(); populateSectionLayout(); });
+    label.addEventListener('pointerdown', event => {
+      if (!editorOpen || !editorAuthenticated) return;
+      event.stopPropagation(); event.preventDefault(); label.setPointerCapture(event.pointerId);
+      selector.value = section.id; layer.querySelectorAll('.section-label').forEach(item => item.classList.toggle('selected', item.dataset.sectionId === section.id)); populateSectionLayout();
+      label.dataset.drag = JSON.stringify({ pointerId: event.pointerId, x: event.clientX, y: event.clientY, placementX: section.placementX, placementZ: section.placementZ });
+    });
+    label.addEventListener('pointermove', event => {
+      if (!label.dataset.drag) return;
+      const drag = JSON.parse(label.dataset.drag); if (drag.pointerId !== event.pointerId) return;
+      const dx = Math.round((event.clientX - drag.x) / (pixels * zoom));
+      const dz = -Math.round((event.clientY - drag.y) / (pixels * zoom));
+      label.style.left = `${(section.placementX + section.labelX + dx) * pixels}px`;
+      label.style.top = `${(depth - 1 - section.placementZ - section.labelZ - dz) * pixels}px`;
+      scheduleLayoutPreview(section.id, section.placementX + dx, section.placementZ + dz);
+    });
+    const finishDrag = async event => {
+      if (!label.dataset.drag) return;
+      const drag = JSON.parse(label.dataset.drag); if (drag.pointerId !== event.pointerId) return;
+      label.dataset.drag = '';
+      const dx = Math.round((event.clientX - drag.x) / (pixels * zoom)), dz = -Math.round((event.clientY - drag.y) / (pixels * zoom));
+      if (dx || dz) await saveSectionLayout(section, { placementX: drag.placementX + dx, placementZ: drag.placementZ + dz });
+      else renderSectionLabels();
+    };
+    label.addEventListener('pointerup', finishDrag); label.addEventListener('pointercancel', finishDrag);
+    layer.append(label);
+  }
+  populateSectionLayout();
+}
+
+function selectedLayoutSection() { return floorManifest?.sections.find(section => section.id === document.querySelector('#layout-section').value) ?? null; }
+function populateSectionLayout() {
+  const section = selectedLayoutSection(); if (!section) return;
+  document.querySelector('#section-x').value = section.placementX;
+  document.querySelector('#section-z').value = section.placementZ;
+  document.querySelector('#section-label-x').value = section.labelX;
+  document.querySelector('#section-label-z').value = section.labelZ;
+}
+function renderLayoutConflicts() {
+  const svg = document.querySelector('#section-selection'); if (!svg || !floorManifest) return;
+  const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1, origin = floorManifest.coordinateOrigin ?? { x: 0, z: 0 };
+  svg.setAttribute('viewBox', `0 0 ${image.naturalWidth || image.width} ${image.naturalHeight || image.height}`); svg.replaceChildren();
+  for (const cell of layoutConflicts) {
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', String((cell.x - origin.x) * pixels)); rect.setAttribute('y', String((depth - 1 - (cell.z - origin.z)) * pixels));
+    rect.setAttribute('width', String(pixels)); rect.setAttribute('height', String(pixels)); rect.setAttribute('class', 'layout-conflict'); svg.append(rect);
+  }
+}
+function scheduleLayoutPreview(sectionId = selectedLayoutSection()?.id, placementX = Number(document.querySelector('#section-x').value), placementZ = Number(document.querySelector('#section-z').value)) {
+  if (!editorAuthenticated || !sectionId || !Number.isSafeInteger(placementX) || !Number.isSafeInteger(placementZ)) return;
+  clearTimeout(layoutPreviewTimer);
+  layoutPreviewTimer = setTimeout(async () => {
+    const origin = floorManifest.coordinateOrigin ?? { x: 0, z: 0 };
+    const query = new URLSearchParams({ placementX: String(placementX + origin.x), placementZ: String(placementZ + origin.z) });
+    const response = await fetch(`/api/project/sections/${encodeURIComponent(sectionId)}/layout-preview?${query}`);
+    if (!response.ok) return;
+    layoutConflicts = (await response.json()).conflicts; renderLayoutConflicts();
+    document.querySelector('#section-layout-status').textContent = layoutConflicts.length ? `${layoutConflicts.length} occupied block conflict${layoutConflicts.length === 1 ? '' : 's'} highlighted. Move the section before saving.` : 'No occupied placement conflicts.';
+  }, 90);
+}
+async function saveSectionLayout(section = selectedLayoutSection(), values = null) {
+  if (!section) return;
+  const status = document.querySelector('#section-layout-status'); status.textContent = 'Checking section placement and saving floor…';
+  const input = values ?? { placementX: Number(document.querySelector('#section-x').value), placementZ: Number(document.querySelector('#section-z').value), labelX: Number(document.querySelector('#section-label-x').value), labelZ: Number(document.querySelector('#section-label-z').value) };
+  const origin = floorManifest.coordinateOrigin ?? { x: 0, z: 0 };
+  const response = await fetch(`/api/project/sections/${encodeURIComponent(section.id)}/layout`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, ...input, placementX: input.placementX + origin.x, placementZ: input.placementZ + origin.z }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; renderSectionLabels(); return false; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  if (!result.saved) { status.textContent = `Layout retained; ${result.warning}. Use Save to retry.`; return false; }
+  layoutConflicts = []; renderLayoutConflicts();
+  status.textContent = 'Section layout saved. The floor bounds and visitor map were regenerated.';
+  await loadFloor(floorManifest.id); await refreshSaveStatus(); return true;
+}
+document.querySelector('#layout-section').addEventListener('change', () => { renderSectionLabels(); populateSectionLayout(); });
+document.querySelector('#section-layout-save').addEventListener('click', () => void saveSectionLayout());
+async function sectionLayoutHistory(direction) {
+  const status = document.querySelector('#section-layout-status');
+  const response = await fetch(`/api/project/sections/layout/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  if (!result.saved) { status.textContent = `Layout ${direction} retained; ${result.warning}. Use Save to retry.`; return; }
+  status.textContent = `Section layout ${direction} complete.`; await loadFloor(floorManifest.id); await refreshSaveStatus();
+}
+document.querySelector('#section-layout-undo').addEventListener('click', () => void sectionLayoutHistory('undo'));
+document.querySelector('#section-layout-redo').addEventListener('click', () => void sectionLayoutHistory('redo'));
+for (const id of ['section-x', 'section-z']) document.querySelector(`#${id}`).addEventListener('input', () => scheduleLayoutPreview());
 function renderSelection() {
   const svg = document.querySelector('#block-selection');
   if (!svg || !floorManifest) return;

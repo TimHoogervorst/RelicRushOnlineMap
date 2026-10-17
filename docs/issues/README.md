@@ -1,6 +1,6 @@
 # Implementation tickets
 
-Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01–06 have integrated implementation work and remain in progress pending their listed acceptance checks. Ticket 07 has implementation work in progress; tickets 08–15 remain blocked by dependencies.
+Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01–06 have integrated implementation work and remain in progress pending their listed acceptance checks. Tickets 07 and 08 have implementation work in progress; tickets 09–15 remain blocked by dependencies.
 
 The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSARY.md) are authoritative. These tickets represent vertical slices: every feature includes storage, API, UI and focused verification as applicable. Each can be demonstrated after its blockers are complete. Ticket numbers are local identifiers.
 
@@ -15,7 +15,7 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 | [05 — Place markers and browse a grouped legend](05-markers-and-grouped-legend.md) | The owner can maintain points of interest; visitors can find and filter them. | In progress | 04 |
 | [06 — Edit individual blocks with a block palette](06-single-block-editing.md) | The owner can make small geometry corrections directly in the map. | In progress | 04 |
 | [07 — Move block selections and inspect lower heights](07-selection-height-and-slices.md) | The owner can adjust several blocks together and reach geometry hidden beneath upper blocks. | In progress | 06 |
-| [08 — Arrange entire sections with their markers and labels](08-whole-section-layout.md) | The owner can spread dungeon areas apart while preserving their points of interest. | Blocked | 05 |
+| [08 — Arrange entire sections with their markers and labels](08-whole-section-layout.md) | The owner can spread dungeon areas apart while preserving their points of interest. | In progress | 05 |
 | [09 — Draw dotted connections between section entrances](09-dotted-section-connections.md) | Visitors can understand that sections separated in the displayed layout connect in the dungeon. | Blocked | 08 |
 | [10 — Connect stair markers and navigate between floors](10-stair-floor-navigation.md) | Visitors can follow stairs to the corresponding location on another floor. | Blocked | 08 |
 | [11 — Create and maintain custom marker types](11-custom-marker-types.md) | The owner can organize new kinds of points of interest without changing code. | Blocked | 05 |
