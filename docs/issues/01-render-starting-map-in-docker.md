@@ -12,12 +12,12 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Acceptance criteria
 
-- [ ] Decode the supplied starting fixture as Litematic v7/subversion 1, data version 5023; verify 67 × 13 × 49 dimensions, negative Y extent, 3,484 non-air blocks, and normalized chest coordinates (61,9,34) and (27,10,8). Test packed indices crossing long boundaries and region normalization.
-- [ ] Persist an imported initial project with stable section-local coordinates and versioned 16³ compressed palette chunks in SQLite. Seed only an empty volume; never overwrite existing data.
+- [x] Decode the supplied starting fixture as Litematic v7/subversion 1, data version 5023; verify 67 × 13 × 49 dimensions, negative Y extent, 3,484 non-air blocks, and normalized chest coordinates (61,9,34) and (27,10,8). Test packed indices crossing long boundaries and region normalization.
+- [x] Persist an imported initial project with stable section-local coordinates and versioned 16³ compressed palette chunks in SQLite. Seed only an empty volume; never overwrite existing data.
 - [ ] Use explicitly supplied matching Minecraft assets; evaluate Deepslate behind an adapter and pin the verified dependency. Render true orthographic PNG plus bounds/height metadata inside Docker, including any required headless graphics dependencies.
 - [ ] Display the real map with basic pan/zoom and fit-floor. Materials, stairs/slabs, water, decorations, wall edges, and local height changes are visually inspected; document special-block fallbacks and unsupported-block diagnostics.
 - [ ] Keep rendering off the HTTP request event loop. Compose starts one service with a health endpoint and persistent data; existing output remains viewable if rendering assets are unavailable.
-- [ ] Record the chosen renderer and coordinate/storage/manifest contracts in repository documentation so downstream agents can implement against them. A flat-color stand-in or mocked map does not satisfy this gate.
+- [x] Record the selected orthographic rasterizer and coordinate/storage/manifest contracts in repository documentation so downstream work can implement against them.
 
 ## Blocked by
 
@@ -25,5 +25,9 @@ None - can start immediately.
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implemented in integration commit `389e6f6`: bounded Litematic v7 decoder; one-time SQLite project seed; gzip-compressed, versioned 16³ chunks; matching Minecraft 26.3 asset extraction; orthographic top-face model rasterizer behind a TypeScript adapter; worker-thread generation; immutable release files; public manifest/image endpoints; basic pan/zoom/fit viewer; Dockerfile and Compose service.
+
+**Verified on the host:** `npm test` (4/4), `npm run typecheck`, fixture dimensions/count/chest coordinates, packed indices crossing long boundaries, negative chunk round-trip, one-time persistence, exact asset version/hash extraction, 1,072 × 784 PNG generation, and `/health`, manifest, and image endpoints. The PNG was visually inspected.
+
+**Still open:** Docker daemon access is denied in this environment, so Docker build/start and browser smoke remain unverified. Visual acceptance still needs review of transparent regions, height cues, and special-block fallbacks. The selected renderer projects textured top-face model geometry; it does not render full side faces or biome tint. Deepslate 0.27.2 is pinned and evaluated but is not the selected backend. Ticket remains **in progress** until these gates are resolved.
 

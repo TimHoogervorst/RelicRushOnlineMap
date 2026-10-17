@@ -41,11 +41,10 @@ export function createRendererAdapter(): RendererAdapter {
   return {
     engine: 'relic-ortho-model-rasterizer',
     async render(input) {
-      return await renderRasterizer(input.schematic, {
-        assets: input.assets,
-        output: input.output,
-        pixelSize: input.pixelSize
-      }) as OrthographicRenderManifest;
+      // The rasterizer is currently implemented in JavaScript; keep the
+      // application-facing contract typed while its option types migrate.
+      const rasterOptions = input as unknown as Parameters<typeof renderRasterizer>[1];
+      return await renderRasterizer(input.schematic, rasterOptions) as OrthographicRenderManifest;
     }
   };
 }
