@@ -1,0 +1,10 @@
+﻿node_modules/
+.worktrees/
+.env
+.env.*
+!.env.example
+data/
+uploads/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
