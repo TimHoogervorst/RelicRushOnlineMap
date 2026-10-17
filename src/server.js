@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -130,6 +130,14 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.get('/api/project/floors', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try { res.json({ revision: projectRevision(db), floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
+    finally { db.close(); }
+  });
+  app.get('/api/project/stairs', requireEditor, async (_req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const project = snapshotProject(db);
+      res.json({ revision: project.revision, stairs: project.floors.flatMap(floor => floor.markers.filter(marker => marker.type === 'stairs').map(marker => ({ ...marker, floorId: floor.id, floorName: floor.name }))) });
+    } catch (error) { res.status(500).json({ error: error.message }); }
     finally { db.close(); }
   });
   app.get('/api/project/height-range', requireEditor, async (req, res) => {
@@ -432,7 +440,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     try {
       if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
       const before = readMarker(db, req.params.id);
-      const marker = saveMarker(db, req.body.marker, req.body.expectedRevision, req.params.id, { preserveDisplayedPosition: req.body.preserveDisplayedPosition === true });
+      const marker = saveMarker(db, req.body.marker, req.body.expectedRevision, req.params.id, { preserveDisplayedPosition: req.body.preserveDisplayedPosition === true, confirmUnlink: req.body.confirmUnlink === true });
       rememberMarker(getSession(req).token, { id: marker.id, before, after: readMarker(db, marker.id) });
       try {
         const saved = await generation.saveMetadata(snapshotProject(db));
@@ -443,19 +451,43 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });
+  app.post('/api/project/stairs/link', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = linkStairs(db, req.body.firstId, req.body.secondId, req.body.expectedRevision);
+      try { const saved = await generation.saveMetadata(snapshotProject(db)); res.json({ ...result, saved, status: generation.queue.status }); }
+      catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|must exist|does not exist|different floors|only stairs|distinct stairs|only one/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.delete('/api/project/stairs/:id/link', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = unlinkStair(db, req.params.id, req.body.expectedRevision);
+      try { const saved = await generation.saveMetadata(snapshotProject(db)); res.json({ ...result, saved, status: generation.queue.status }); }
+      catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
   app.delete('/api/project/markers/:id', requireEditor, requireSameOrigin, async (req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {
       if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
       const before = readMarker(db, req.params.id);
-      const result = deleteMarker(db, req.params.id, req.body.expectedRevision);
+      const result = deleteMarker(db, req.params.id, req.body.expectedRevision, { confirmUnlink: req.body.confirmUnlink === true });
       rememberMarker(getSession(req).token, { id: req.params.id, before, after: null });
       try {
         const saved = await generation.saveMetadata(snapshotProject(db));
         res.json({ ...result, saved, status: generation.queue.status });
       } catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
     } catch (error) {
-      const status = /another editor tab|does not exist/i.test(error.message) ? 409 : 400;
+      const status = /another editor tab|does not exist|confirm removing/i.test(error.message) ? 409 : 400;
       res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });
