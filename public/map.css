@@ -51,4 +51,10 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #marker-form button { margin: 4px 3px 0 0; }
 .marker-row { display: block; margin: 5px 0; padding: 6px; border-left: 3px solid #73896a; }
 .marker-actions { display: flex; gap: 6px; margin: 8px 0; }
+.block-palette { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; max-height: 240px; overflow: auto; margin: 8px 0; }
+.block-option { height: auto; min-height: 30px; padding: 5px 7px; text-align: left; text-transform: capitalize; font: 10px Manrope, sans-serif; }
+#block-properties label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+#block-properties select { min-width: 110px; margin: 0; }
+#block-inspector { border-top: 1px solid #303a34; margin-top: 8px; padding-top: 6px; }
+#block-inspector[hidden] { display: none; }
 @media (max-width: 600px) { .toolbar { height: 58px; gap: 10px; padding: 0 12px; } .brand strong { font-size: 12px; } .brand small, .floor-picker { display: none; } #viewport { height: calc(100vh - 58px); } .actions { gap: 5px; } button { height: 32px; } }

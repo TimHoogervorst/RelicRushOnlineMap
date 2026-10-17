@@ -2,10 +2,10 @@ import express from 'express';
 import { Worker } from 'node:worker_threads';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +29,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
   const sessions = new Map(), failures = new Map();
   const markerHistory = new Map();
+  const blockHistory = new Map();
   const rememberMarker = (token, command) => {
     const history = markerHistory.get(token) ?? { undo: [], redo: [] };
     history.undo.push(command);
@@ -80,7 +81,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -128,6 +129,92 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try { res.json({ revision: projectRevision(db), floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
     finally { db.close(); }
+  });
+  app.get('/api/project/sections/:id/blocks', requireEditor, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const section = db.prepare('SELECT id,name,bounds_json,placement_x AS placementX,placement_z AS placementZ FROM sections WHERE id=?').get(req.params.id);
+      if (!section) return res.status(404).json({ error: 'Section does not exist.' });
+      res.json({ revision: projectRevision(db), section: { ...section, bounds: JSON.parse(section.bounds_json) }, blocks: readSectionBlocks(db, section.id) });
+    } finally { db.close(); }
+  });
+  app.get('/api/project/block-palette', requireEditor, async (_req, res) => {
+    try {
+      const directory = path.join(dataDir, 'assets', 'minecraft', 'blockstates');
+      const files = await readdir(directory);
+      const blocks = [];
+      for (const file of files.filter(name => name.endsWith('.json'))) {
+        const id = `minecraft:${file.slice(0, -5)}`;
+        let source;
+        try { source = JSON.parse(await readFile(path.join(directory, file), 'utf8')); } catch { continue; }
+        const values = new Map();
+        for (const key of Object.keys(source.variants ?? {})) for (const pair of key.split(',').filter(Boolean)) {
+          const [name, value] = pair.split('='); if (!values.has(name)) values.set(name, new Set());
+          for (const allowed of value.split('|')) values.get(name).add(allowed);
+        }
+        const gather = condition => {
+          if (!condition || typeof condition !== 'object') return;
+          for (const [name, value] of Object.entries(condition)) {
+            if (name === 'OR' || name === 'AND') { for (const part of value) gather(part); continue; }
+            if (!values.has(name)) values.set(name, new Set());
+            for (const allowed of Array.isArray(value) ? value : String(value).split('|')) values.get(name).add(allowed);
+          }
+        };
+        for (const part of source.multipart ?? []) gather(part.when);
+        blocks.push({ id, properties: Object.fromEntries([...values].map(([name, allowed]) => [name, [...allowed].sort()])) });
+      }
+      blocks.sort((a, b) => a.id.localeCompare(b.id));
+      res.json({ blocks });
+    } catch { res.status(503).json({ error: 'Configure matching Minecraft assets before editing blocks.' }); }
+  });
+  app.post('/api/project/blocks', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const { sectionId, x, y, z, state = null } = req.body;
+      if (state !== null) {
+        if (!state || typeof state.id !== 'string' || !/^minecraft:[a-z0-9_./-]+$/.test(state.id)) return res.status(400).json({ error: 'Choose a block from the configured Minecraft palette.' });
+        let blockstate;
+        try { blockstate = JSON.parse(await readFile(path.join(dataDir, 'assets', 'minecraft', 'blockstates', `${state.id.slice('minecraft:'.length)}.json`), 'utf8')); }
+        catch { return res.status(400).json({ error: 'Choose a block from the configured Minecraft palette.' }); }
+        const allowed = new Map();
+        for (const key of Object.keys(blockstate.variants ?? {})) for (const pair of key.split(',').filter(Boolean)) { const [name, value] = pair.split('='); if (!allowed.has(name)) allowed.set(name, new Set()); for (const item of value.split('|')) allowed.get(name).add(item); }
+        const gather = condition => { if (!condition || typeof condition !== 'object') return; for (const [name, value] of Object.entries(condition)) { if (name === 'OR' || name === 'AND') { for (const part of value) gather(part); continue; } if (!allowed.has(name)) allowed.set(name, new Set()); for (const item of Array.isArray(value) ? value : String(value).split('|')) allowed.get(name).add(item); } };
+        for (const part of blockstate.multipart ?? []) gather(part.when);
+        for (const [name, value] of Object.entries(state.properties ?? {})) if (!allowed.get(name)?.has(value)) return res.status(400).json({ error: `Invalid ${name}=${value} state for ${state.id}.` });
+        const variants = Object.keys(blockstate.variants ?? {});
+        const matchesVariant = variants.some(key => key.split(',').filter(Boolean).every(pair => { const [name, value] = pair.split('='); return state.properties?.[name] === value || value.split('|').includes(state.properties?.[name]); }));
+        if (variants.length && !matchesVariant) return res.status(400).json({ error: `The selected property combination is not a valid state for ${state.id}.` });
+      }
+      const before = readSectionBlock(db, sectionId, x, y, z);
+      const result = saveBlock(db, { sectionId, x, y, z, state }, req.body.expectedRevision);
+      const after = readSectionBlock(db, sectionId, x, y, z);
+      const history = blockHistory.get(getSession(req).token) ?? { undo: [], redo: [] };
+      history.undo.push({ sectionId, x, y, z, before, after }); if (history.undo.length > 100) history.undo.shift(); history.redo = [];
+      blockHistory.set(getSession(req).token, history);
+      try { const saved = await generation.save(snapshotProject(db)); return res.status(before ? 200 : 201).json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning section/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/blocks/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const token = getSession(req).token, history = blockHistory.get(token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'];
+    const command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no block edit to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = restoreBlock(db, command, direction, req.body.expectedRevision);
+      source.pop(); target.push(command); blockHistory.set(token, history);
+      try { const saved = await generation.save(snapshotProject(db)); res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
   });
   app.get('/api/generation/status', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));

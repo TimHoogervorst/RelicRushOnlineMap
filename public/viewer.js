@@ -25,14 +25,15 @@ document.querySelector('#fit').addEventListener('click', fitFloor);
 document.querySelector('#zoom-in').addEventListener('click', () => setZoom(zoom * 1.25));
 document.querySelector('#zoom-out').addEventListener('click', () => setZoom(zoom / 1.25));
 viewport.addEventListener('wheel', event => { event.preventDefault(); setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY); }, { passive: false });
-viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
-viewport.addEventListener('pointermove', event => { if (!pointer || pointer.id !== event.pointerId) return; offsetX += event.clientX - pointer.x; offsetY += event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; drawTransform(); });
-function endPointer(event) { if (pointer?.id === event.pointerId) { pointer = null; frame.classList.remove('dragging'); } }
+viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
+viewport.addEventListener('pointermove', event => { if (!pointer || pointer.id !== event.pointerId) return; if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 4) pointer.moved = true; offsetX += event.clientX - pointer.x; offsetY += event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; drawTransform(); });
+function endPointer(event) { if (pointer?.id === event.pointerId) { const click = !pointer.moved, target = pointer.target; pointer = null; frame.classList.remove('dragging'); if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY); } }
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
 image.addEventListener('load', fitFloor);
 
 let editorOpen = false, sidebarOpen = true, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null;
 let initialMarkerSection = null, initialMarkerDisplay = null;
+let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
 const markerTypes = ['chest', 'relic', 'shop', 'stairs', 'other'];
 const markerTitles = { chest: 'Chests', relic: 'Relics', shop: 'Shops', stairs: 'Stairs', other: 'Other' };
 const markerIcon = type => `/icons/${markerTypes.includes(type) ? type : 'other'}.svg`;
@@ -78,6 +79,106 @@ function renderSidebar() {
   modeButton.setAttribute('aria-pressed', String(editorOpen));
   document.querySelector('#marker-layer').classList.toggle('editing', editorOpen);
 }
+
+function renderBlockPalette() {
+  const host = document.querySelector('#block-palette');
+  if (!host) return;
+  host.replaceChildren();
+  const query = document.querySelector('#block-search').value.trim().toLowerCase();
+  for (const block of blockCatalog.filter(item => item.id.includes(query)).slice(0, 80)) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'block-option'; button.role = 'option'; button.draggable = true; button.textContent = block.id.replace('minecraft:', '').replaceAll('_', ' '); button.title = block.id;
+    button.addEventListener('click', () => chooseBlock(block.id));
+    button.addEventListener('dragstart', event => { event.dataTransfer.setData('application/x-minecraft-block', block.id); event.dataTransfer.effectAllowed = 'copy'; });
+    host.append(button);
+  }
+}
+function chooseBlock(id) {
+  const definition = blockCatalog.find(item => item.id === id); if (!definition) return;
+  const existing = inspectedBlock?.id === id ? inspectedBlock.properties : {};
+  paletteChoice = { id, properties: Object.fromEntries(Object.entries(definition.properties).map(([name, values]) => [name, values.includes(existing[name]) ? existing[name] : values[0]])) };
+  renderBlockProperties();
+  document.querySelector('#block-status').textContent = `Selected ${id}. Edit properties and save, or drag it onto the map.`;
+}
+function renderBlockProperties() {
+  const host = document.querySelector('#block-properties'); host.replaceChildren();
+  if (!paletteChoice) return;
+  const definition = blockCatalog.find(item => item.id === paletteChoice.id);
+  for (const [name, values] of Object.entries(definition?.properties ?? {})) {
+    const label = document.createElement('label'); label.textContent = name;
+    const select = document.createElement('select'); select.dataset.property = name;
+    for (const value of values) select.add(new Option(value, value));
+    select.value = paletteChoice.properties[name]; select.addEventListener('change', () => { paletteChoice.properties[name] = select.value; });
+    label.append(select); host.append(label);
+  }
+  document.querySelector('#block-selected-state').textContent = `${paletteChoice.id} ${JSON.stringify(paletteChoice.properties)}`;
+}
+async function loadBlockPalette() {
+  try {
+    const response = await fetch('/api/project/block-palette'); const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    blockCatalog = data.blocks; renderBlockPalette();
+  } catch (error) { document.querySelector('#block-status').textContent = error.message; }
+}
+function blockTargetAt(clientX, clientY) {
+  const pixels = floorManifest?.renderer?.pixelSize ?? 16, rect = frame.getBoundingClientRect();
+  const screenX = Math.floor((clientX - rect.left) / zoom / pixels), screenZ = Math.floor((clientY - rect.top) / zoom / pixels);
+  const sections = floorManifest?.sections ?? [];
+  const depth = floorManifest.bounds?.depth ?? 1;
+  const section = sections.find(item => {
+    const bounds = item.localBounds ?? { minX: 0, minZ: 0, maxX: item.bounds.x, maxZ: item.bounds.z };
+    return screenX >= item.placementX + bounds.minX && screenX < item.placementX + bounds.maxX && screenZ > depth - 1 - item.placementZ - bounds.maxZ && screenZ <= depth - 1 - item.placementZ - bounds.minZ;
+  });
+  if (!section) return null;
+  return { section, x: screenX - section.placementX, y: 0, z: depth - 1 - screenZ - section.placementZ, screenX, screenZ };
+}
+async function inspectBlockAt(clientX, clientY) {
+  const target = blockTargetAt(clientX, clientY); if (!target) return;
+  try {
+    const response = await fetch(`/api/project/sections/${encodeURIComponent(target.section.id)}/blocks`); const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    const top = data.blocks.filter(block => block.x + target.section.placementX === target.screenX && floorManifest.bounds.depth - 1 - block.z - target.section.placementZ === target.screenZ).sort((a, b) => b.y - a.y)[0] ?? null;
+    const x = top?.x ?? target.x, z = top?.z ?? target.z;
+    inspectedSection = target.section; inspectedCoords = { sectionId: target.section.id, x, y: top?.y ?? 0, z };
+    inspectedBlock = top; document.querySelector('#block-inspector').hidden = false;
+    document.querySelector('#block-coordinate').textContent = `${target.section.name} · local X ${inspectedCoords.x}, Y ${inspectedCoords.y}, Z ${inspectedCoords.z}`;
+    document.querySelector('#block-status').textContent = top ? 'Block selected.' : 'Empty cell selected at Y 0.';
+    if (top) chooseBlock(top.id); else if (paletteChoice) renderBlockProperties();
+    else document.querySelector('#block-selected-state').textContent = 'minecraft:air';
+  } catch (error) { document.querySelector('#block-status').textContent = error.message; }
+}
+async function saveSelectedBlock(state = paletteChoice) {
+  if (!inspectedCoords) { document.querySelector('#block-status').textContent = 'Select a map cell first.'; return false; }
+  const status = document.querySelector('#block-status'); status.textContent = 'Saving block and regenerating floor…';
+  try {
+    const response = await fetch('/api/project/blocks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, ...inspectedCoords, state }) });
+    const result = await response.json(); if (!response.ok && response.status !== 202) throw new Error(result.error);
+    projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+    if (!result.saved) status.textContent = `Edit retained; ${result.warning}. Use Save to retry.`;
+    else { status.textContent = 'Block saved.'; await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+    return result.saved;
+  } catch (error) { status.textContent = error.message; return false; }
+}
+document.querySelector('#block-search').addEventListener('input', renderBlockPalette);
+document.querySelector('#block-save').addEventListener('click', () => void saveSelectedBlock());
+document.querySelector('#block-delete').addEventListener('click', () => void saveSelectedBlock(null));
+async function blockHistoryCommand(direction) {
+  const response = await fetch(`/api/project/blocks/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json(); if (!response.ok) { document.querySelector('#block-status').textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  document.querySelector('#block-status').textContent = result.saved ? `Block ${direction} complete.` : `${direction} retained; ${result.warning}. Use Save to retry.`;
+  if (result.saved) { await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+}
+document.querySelector('#block-undo').addEventListener('click', () => void blockHistoryCommand('undo'));
+document.querySelector('#block-redo').addEventListener('click', () => void blockHistoryCommand('redo'));
+viewport.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('application/x-minecraft-block')) event.preventDefault(); });
+viewport.addEventListener('drop', async event => {
+  const id = event.dataTransfer.getData('application/x-minecraft-block'); if (!id || !editorOpen) return;
+  event.preventDefault(); const target = blockTargetAt(event.clientX, event.clientY); if (!target) return;
+  inspectedSection = target.section; inspectedCoords = { sectionId: target.section.id, x: target.x, y: 0, z: target.z }; inspectedBlock = null;
+  chooseBlock(id); document.querySelector('#block-inspector').hidden = false;
+  document.querySelector('#block-coordinate').textContent = `${target.section.name} · local X ${target.x}, Y 0, Z ${target.z}`;
+  await saveSelectedBlock();
+});
 
 function renderMarkers() {
   if (!floorManifest) return;
@@ -250,6 +351,7 @@ async function refreshSession() {
       : 'No matching assets are configured yet.';
     const floors = await fetch('/api/project/floors').then(result => result.json());
     projectRevision = floors.revision;
+    await loadBlockPalette();
     const selector = document.querySelector('#import-floor');
     selector.replaceChildren(new Option('Create a new floor', ''));
     for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));

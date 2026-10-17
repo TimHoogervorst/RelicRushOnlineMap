@@ -1,6 +1,6 @@
 # Implementation tickets
 
-Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Ticket 01 remains in progress. Ticket 02 has an integrated implementation but remains in progress pending runtime/browser acceptance; later tickets remain blocked by their listed dependencies.
+Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01, 02, 05, and 06 have integrated or active implementation work but remain in progress pending runtime/browser acceptance; later tickets remain blocked by their listed dependencies.
 
 The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSARY.md) are authoritative. These tickets represent vertical slices: every feature includes storage, API, UI and focused verification as applicable. Each can be demonstrated after its blockers are complete. Ticket numbers are local identifiers.
 

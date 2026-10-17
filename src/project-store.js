@@ -153,12 +153,21 @@ export function snapshotProject(db) {
     const sections = db.prepare('SELECT id,name,bounds_json,placement_x,placement_z,label_x,label_z FROM sections WHERE floor_id=? ORDER BY id').all(floor.id).map(row => ({
       id: row.id, name: row.name, bounds: JSON.parse(row.bounds_json), placementX: row.placement_x, placementZ: row.placement_z, labelX: row.label_x, labelZ: row.label_z
     }));
-    const minX = Math.min(0, ...sections.map(section => section.placementX));
-    const minZ = Math.min(0, ...sections.map(section => section.placementZ));
-    const maxX = Math.max(0, ...sections.map(section => section.placementX + section.bounds.x));
-    const maxZ = Math.max(0, ...sections.map(section => section.placementZ + section.bounds.z));
+    const sectionBlocks = new Map(sections.map(section => [section.id, readSectionBlocks(db, section.id)]));
+    for (const section of sections) {
+      const blocks = sectionBlocks.get(section.id);
+      section.localBounds = {
+        minX: Math.min(0, ...blocks.map(block => block.x)), minZ: Math.min(0, ...blocks.map(block => block.z)),
+        maxX: Math.max(section.bounds.x, ...blocks.map(block => block.x + 1)), maxZ: Math.max(section.bounds.z, ...blocks.map(block => block.z + 1))
+      };
+    }
+    // The floor image frame may expand around out-of-bounds edits, while each section's stored local origin stays fixed.
+    const minX = Math.min(0, ...sections.flatMap(section => [section.placementX, ...sectionBlocks.get(section.id).map(block => section.placementX + block.x)]));
+    const minZ = Math.min(0, ...sections.flatMap(section => [section.placementZ, ...sectionBlocks.get(section.id).map(block => section.placementZ + block.z)]));
+    const maxX = Math.max(0, ...sections.flatMap(section => [section.placementX + section.bounds.x, ...sectionBlocks.get(section.id).map(block => section.placementX + block.x + 1)]));
+    const maxZ = Math.max(0, ...sections.flatMap(section => [section.placementZ + section.bounds.z, ...sectionBlocks.get(section.id).map(block => section.placementZ + block.z + 1)]));
     const maxY = Math.max(1, ...sections.map(section => section.bounds.y));
-    const blocks = sections.flatMap(section => readSectionBlocks(db, section.id).map(block => ({ ...block, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
+    const blocks = sections.flatMap(section => sectionBlocks.get(section.id).map(block => ({ ...block, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
     for (const section of sections) { section.placementX -= minX; section.placementZ -= minZ; }
     const markers = db.prepare(`SELECT m.id,m.section_id AS sectionId,m.type,m.name,m.description,m.x,m.z,m.stair_destination_id AS stairDestinationId,s.placement_x AS sectionX,s.placement_z AS sectionZ FROM markers m JOIN sections s ON s.id=m.section_id WHERE s.floor_id=? ORDER BY m.id`).all(floor.id).map(marker => ({
       id: marker.id, sectionId: marker.sectionId, type: marker.type, name: marker.name, description: marker.description,
@@ -204,6 +213,68 @@ export function readSectionBlocks(db, sectionId = 'section-start-0f') {
     }
   }
   return result;
+}
+
+function validateBlockState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state) || typeof state.id !== 'string' || !/^minecraft:[a-z0-9_./-]+$/.test(state.id)) throw new Error('Choose a Minecraft block from the palette.');
+  const properties = state.properties ?? {};
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties) || Object.keys(properties).length > 32) throw new Error('Block state properties are invalid.');
+  for (const [key, value] of Object.entries(properties)) if (!/^[a-z0-9_]+$/.test(key) || typeof value !== 'string' || value.length > 80) throw new Error('Block state properties are invalid.');
+  return { id: state.id, properties };
+}
+
+export function readSectionBlock(db, sectionId, x, y, z) {
+  const cx = Math.floor(x / CHUNK_SIZE), cy = Math.floor(y / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+  const row = db.prepare('SELECT blob FROM section_chunks WHERE section_id=? AND chunk_x=? AND chunk_y=? AND chunk_z=?').get(sectionId, cx, cy, cz);
+  if (!row) return null;
+  const chunk = decodeChunkBlob(row.blob);
+  const index = localIndex(((x % 16) + 16) % 16, ((y % 16) + 16) % 16, ((z % 16) + 16) % 16);
+  const state = chunk.palette[chunk.indices[index]];
+  if (state.id === 'minecraft:air') return null;
+  return { x, y, z, id: state.id, properties: state.properties ?? {}, blockEntities: chunk.blockEntities.filter(entity => entity.x === x && entity.y === y && entity.z === z) };
+}
+
+/** Store one block cell mutation as an atomic palette-chunk and revision update. */
+export function saveBlock(db, { sectionId, x, y, z, state = null, blockEntities }, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (![x, y, z].every(value => Number.isSafeInteger(value) && Math.abs(value) <= 1_000_000)) throw new Error('Block coordinates must be whole numbers within the supported range.');
+  if (!db.prepare('SELECT 1 FROM sections WHERE id=?').get(sectionId)) throw new Error('Choose an existing owning section.');
+  const before = readSectionBlock(db, sectionId, x, y, z);
+  const next = state === null ? null : validateBlockState(state);
+  if (JSON.stringify(before && { id: before.id, properties: before.properties }) === JSON.stringify(next)) throw new Error('The block already has that state.');
+  const cx = Math.floor(x / CHUNK_SIZE), cy = Math.floor(y / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE);
+  const index = localIndex(((x % 16) + 16) % 16, ((y % 16) + 16) % 16, ((z % 16) + 16) % 16);
+  const row = db.prepare('SELECT blob FROM section_chunks WHERE section_id=? AND chunk_x=? AND chunk_y=? AND chunk_z=?').get(sectionId, cx, cy, cz);
+  const chunk = row ? decodeChunkBlob(row.blob) : { version: 1, palette: [{ id: 'minecraft:air', properties: {} }], indices: new Array(4096).fill(0), blockEntities: [] };
+  if (!chunk.palette.some(item => item.id === 'minecraft:air' && JSON.stringify(item.properties ?? {}) === '{}')) chunk.palette.unshift({ id: 'minecraft:air', properties: {} });
+  const air = chunk.palette.findIndex(item => item.id === 'minecraft:air');
+  if (next) {
+    let paletteIndex = chunk.palette.findIndex(item => item.id === next.id && JSON.stringify(item.properties ?? {}) === JSON.stringify(next.properties));
+    if (paletteIndex < 0) { paletteIndex = chunk.palette.length; chunk.palette.push(next); }
+    chunk.indices[index] = paletteIndex;
+  } else chunk.indices[index] = air;
+  // A block entity belongs to a block identity. Replacing or removing its owner clears it.
+  const entities = chunk.blockEntities.filter(entity => entity.x !== x || entity.y !== y || entity.z !== z);
+  if (blockEntities !== undefined) chunk.blockEntities = [...entities, ...blockEntities];
+  else if (before && next?.id === before.id) chunk.blockEntities = chunk.blockEntities;
+  else chunk.blockEntities = entities;
+  const tx = db.transaction(() => {
+    const packed = gzipSync(Buffer.from(JSON.stringify(chunk)));
+    db.prepare(`INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,1,?)
+      ON CONFLICT(section_id,chunk_x,chunk_y,chunk_z) DO UPDATE SET format_version=1,blob=excluded.blob`).run(sectionId, cx, cy, cz, packed);
+    const boundsRow = db.prepare('SELECT bounds_json FROM sections WHERE id=?').get(sectionId);
+    const bounds = JSON.parse(boundsRow.bounds_json);
+    bounds.x = Math.max(bounds.x, x + 1); bounds.y = Math.max(bounds.y, y + 1); bounds.z = Math.max(bounds.z, z + 1);
+    db.prepare('UPDATE sections SET bounds_json=? WHERE id=?').run(JSON.stringify(bounds), sectionId);
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { sectionId, x, y, z, state: next, before: before && { id: before.id, properties: before.properties }, revision: expectedRevision + 1 };
+}
+
+export function restoreBlock(db, command, direction, expectedRevision) {
+  const target = direction === 'undo' ? command.before : command.after;
+  return saveBlock(db, { sectionId: command.sectionId, x: command.x, y: command.y, z: command.z, state: target && { id: target.id, properties: target.properties }, blockEntities: target?.blockEntities ?? [] }, expectedRevision);
 }
 
 /** Persist one decoded schematic as an independent section in a shared schematic coordinate frame. */
