@@ -51,6 +51,11 @@ async function refreshSession() {
     document.querySelector('#setup-status').textContent = project.assetsConfigured
       ? `Minecraft ${project.assets.minecraftVersion} assets are configured.`
       : 'No matching assets are configured yet.';
+    const floors = await fetch('/api/project/floors').then(result => result.json());
+    const selector = document.querySelector('#import-floor');
+    selector.replaceChildren(new Option('Create a new floor', ''));
+    for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
+    document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
   }
 }
 document.querySelector('#edit-mode').addEventListener('click', async () => {
@@ -81,6 +86,21 @@ document.querySelector('#upload-assets').addEventListener('click', async () => {
   const response = await fetch('/api/assets/upload', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file });
   const result = await response.json();
   status.textContent = response.ok ? `Minecraft ${result.assets.minecraftVersion} assets saved (${result.assets.blockTextures} textures).` : result.error;
+});
+document.querySelector('#import-floor').addEventListener('change', event => { document.querySelector('#import-floor-name').disabled = Boolean(event.target.value); });
+document.querySelector('#import-schematic').addEventListener('click', async () => {
+  const file = document.querySelector('#schematic-file').files[0];
+  const status = document.querySelector('#import-status');
+  if (!file) { status.textContent = 'Choose a Litematic file first.'; return; }
+  const sectionName = document.querySelector('#import-section-name').value.trim() || file.name.replace(/\.litematic$/i, '');
+  const floorId = document.querySelector('#import-floor').value;
+  status.textContent = 'Validating and importing schematic…';
+  const headers = { 'content-type': 'application/octet-stream', 'x-source-name': file.name, 'x-section-name': sectionName, 'x-floor-name': document.querySelector('#import-floor-name').value.trim() || 'Floor 0' };
+  if (floorId) headers['x-floor-id'] = floorId;
+  const response = await fetch('/api/project/import', { method: 'POST', headers, body: file });
+  const result = await response.json();
+  status.textContent = response.ok ? `Imported ${result.blockCount} blocks into ${sectionName}. The source upload was removed.` : result.error;
+  if (response.ok) await refreshSession();
 });
 renderSidebar();
 
