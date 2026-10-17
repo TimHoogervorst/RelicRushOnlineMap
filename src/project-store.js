@@ -58,7 +58,38 @@ export function openProject(path) {
   const sectionColumns = new Set(db.pragma('table_info(sections)').map(column => column.name));
   if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
   if (!sectionColumns.has('label_z')) db.exec('ALTER TABLE sections ADD COLUMN label_z REAL NOT NULL DEFAULT 0');
+  db.prepare("INSERT OR IGNORE INTO project_meta(key,value) VALUES('revision','0')").run();
   return db;
+}
+
+export function projectRevision(db) {
+  const value = db.prepare("SELECT value FROM project_meta WHERE key='revision'").get()?.value;
+  return Number.isSafeInteger(Number(value)) ? Number(value) : 0;
+}
+
+export function advanceProjectRevision(db, expectedRevision = projectRevision(db)) {
+  const result = db.prepare("UPDATE project_meta SET value=? WHERE key='revision' AND value=?")
+    .run(String(expectedRevision + 1), String(expectedRevision));
+  if (result.changes !== 1) throw new Error('Project changed in another editor tab. Reload and retry your edit.');
+  return expectedRevision + 1;
+}
+
+export function snapshotProject(db) {
+  const revision = projectRevision(db);
+  const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
+  return { revision, floors: floors.map(floor => {
+    const sections = db.prepare('SELECT id,name,bounds_json,placement_x,placement_z,label_x,label_z FROM sections WHERE floor_id=? ORDER BY id').all(floor.id).map(row => ({
+      id: row.id, name: row.name, bounds: JSON.parse(row.bounds_json), placementX: row.placement_x, placementZ: row.placement_z, labelX: row.label_x, labelZ: row.label_z
+    }));
+    const minX = Math.min(0, ...sections.map(section => section.placementX));
+    const minZ = Math.min(0, ...sections.map(section => section.placementZ));
+    const maxX = Math.max(0, ...sections.map(section => section.placementX + section.bounds.x));
+    const maxZ = Math.max(0, ...sections.map(section => section.placementZ + section.bounds.z));
+    const maxY = Math.max(1, ...sections.map(section => section.bounds.y));
+    const blocks = sections.flatMap(section => readSectionBlocks(db, section.id).map(block => ({ ...block, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
+    for (const section of sections) { section.placementX -= minX; section.placementZ -= minZ; }
+    return { ...floor, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections };
+  }) };
 }
 
 export function seedInitialProject(db, fixturePath) {
@@ -149,6 +180,7 @@ export function importSchematicSection(db, schematic, { floorId = null, floorNam
     const insert = db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,?,?)');
     for (const chunk of chunks) insert.run(sectionId, chunk.cx, chunk.cy, chunk.cz, 1, chunk.compressed);
     db.prepare("INSERT OR REPLACE INTO project_meta(key,value) VALUES('schema_version','1'),('coordinate_contract','section-local x,y,z; chunks 16^3; index=(y*16+z)*16+x')").run();
+    advanceProjectRevision(db);
   });
   tx();
   return { floorId: targetFloorId, sectionId, createdFloor: creatingFloor, dimensions, blockCount: blocks.length, chunkCount: chunks.length };

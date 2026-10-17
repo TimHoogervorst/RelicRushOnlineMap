@@ -1,6 +1,6 @@
 # 04 — Keep saves consistent during rendering and failures
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -25,5 +25,11 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implemented the shared save contract foundation. Project imports now require the caller's expected project revision, commit their revision increment with their SQLite changes, and enqueue generation from an immutable geometry snapshot. Saves run serially, replace one pending autosave with the newest revision, and reject stale work. Each completed release contains its floor images, manifest and project snapshot under one revision; a single atomic pointer update makes it public. Public manifests are uncached and image URLs pin a revision with immutable caching. Startup regenerates from persisted project data, so an interrupted render leaves the old pointer intact and is retried on restart.
+
+The editor shows save state/progress and offers Save to retry/flush. Schematic imports autosave after import. Renderer work runs in a worker so map visitors can keep requesting the last complete release. Failed import rendering returns the accepted edit as recoverable and reports the save failure. There is no Publish action.
+
+Verification: `npm.cmd test` (22/22 passed); `npm.cmd run typecheck` (passed). Added queue ordering/coalescing/failure tests, immutable release and retry tests, stale project revision/API checks, manifest/image cache assertions, and floor-snapshot assertions through the public routes.
+
+Remaining: two-tab browser verification, Docker acceptance, and process-kill/restart exercise were not run. The UI has no geometry/text edit controls yet, so debounce and undo/redo are contracts for later mutation tickets rather than exercised editing flows. Ticket 03's imported floors now appear in generation manifests, but full floor/section overlay presentation still needs viewer work. Do not mark done until those checks and the reusable session-command/undo contract are completed.
 
