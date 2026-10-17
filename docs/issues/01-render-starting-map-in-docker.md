@@ -31,3 +31,5 @@ Implemented in integration commit `389e6f6`: bounded Litematic v7 decoder; one-t
 
 **Still open:** Docker daemon access is denied in this environment, so Docker build/start and browser smoke remain unverified. Visual acceptance still needs review of transparent regions, height cues, and special-block fallbacks. The selected renderer projects textured top-face model geometry; it does not render full side faces or biome tint. Deepslate 0.27.2 is pinned and evaluated but is not the selected backend. Ticket remains **in progress** until these gates are resolved.
 
+**Follow-up implementation:** the renderer now uses neighbor-relative local height shading, emits partial surface heights in a per-floor grid with explicit empty cells, and publishes the grid with the immutable release. Host fixture rendering was inspected; Docker visual acceptance and complete water/partial-surface review remain open.
+

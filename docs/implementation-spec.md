@@ -1,6 +1,6 @@
 # Relic dungeon map — implementation spec
 
-Status: interview decisions consolidated, including whole-section movement and dotted section connections. One Docker app owns viewing, editing, imports, storage, and generation. Saving updates the public map; there is no separate preview or publish workflow. No application functionality has been implemented.
+Status: interview decisions consolidated, including whole-section movement and dotted section connections. One Docker app owns viewing, editing, imports, storage, and generation. Saving updates the public map; there is no separate preview or publish workflow. Integrated implementations for all 15 local tickets are present; Docker runtime and full interactive browser acceptance remain open. See the ticket handoffs for verified behavior and limitations.
 
 ## Outcome
 

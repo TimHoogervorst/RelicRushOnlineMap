@@ -1,6 +1,6 @@
 # Implementation tickets
 
-Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01–06 have integrated implementation work and remain in progress pending their listed acceptance checks. Tickets 07, 08, 09, and 10 have implementation work in progress; tickets 11–15 remain subject to their listed dependencies; tickets 11 and 12 have parallel implementation work in progress.
+Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. All 15 ticket implementations are integrated and remain in progress pending the acceptance checks recorded in their handoffs. Docker Engine acceptance remains blocked by unavailable Engine access; headless Chrome verified pan/zoom/pinch, while the full interactive journey and accessibility review remain open.
 
 The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSARY.md) are authoritative. These tickets represent vertical slices: every feature includes storage, API, UI and focused verification as applicable. Each can be demonstrated after its blockers are complete. Ticket numbers are local identifiers.
 
@@ -26,7 +26,7 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 
 ## Fresh-session start
 
-Read the implementation spec, glossary and the chosen ticket. Treat later conversation decisions reflected in the spec as superseding the early local-generator-only plan. Start with ticket 01: prove the actual textured fixture renders in Docker before extending the editor.
+Read the implementation spec, glossary, and the relevant handoffs. All feature slices are implemented; continue with Docker startup/volume acceptance and interactive browser/accessibility checks. Recheck the recorded limitations before marking any ticket done.
 
 Do not implement the entire backlog in one shared checkout concurrently. After 04, marker work (05) and block work (06) can proceed in parallel. After 05, custom types (11) can proceed alongside section layout (08). After 06, selection/height (07) and readability (12) can proceed in parallel. After 08, dotted connections (09) and stairs (10) can proceed in parallel. Coordinate shared schema/API changes and integration ownership. Prefer isolated branches/worktrees for parallel implementation; integrate each completed slice and its checks before marking its dependents ready.
 
