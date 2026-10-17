@@ -1,6 +1,6 @@
 # 15 — Verify the complete Docker workflow and document operation
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -25,5 +25,11 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+- Added [Operations](../operations.md) covering startup, password override, asset persistence, floor/section imports, edits and save state, current input/render/backup limits, backup/restore and migration, and HTTPS proxy trust/cookie settings.
+- Compose now forwards `TRUST_PROXY` and `COOKIE_SECURE`; `.env.example` documents both. Port 3000 remains localhost-only.
+- Added `tests/release-journey.test.js`, which starts from an empty temporary data directory, seeds the supplied real schematic, checks seed idempotence and anonymous read, imports into existing/new floors, edits block geometry and section placement, moves a block selection vertically and checks height-range metadata, creates a custom marker type, markers, reciprocal stairs and a dotted connection, checks save status and visitor image/manifest refresh, exports a full archive, and restores into a second empty directory. It checks source upload cleanup and scans public output and extracted backup entries for the private password/source filename.
+- Found and fixed a public drawer gap while using narrow Chrome: the visitor legend did not have a close button, and its reopen button was nested inside the hidden sidebar. The close control is now shared by visitor/editor views and the reopen control is outside the drawer. The mobile toolbar hides redundant zoom buttons to leave room for Fit floor and Edit.
+- Verification on the host: `npm.cmd run typecheck` passed; `npm.cmd test` passed (66 tests); `docker compose config` passed and showed localhost binding plus the two proxy variables. Host service smoke with the local 26.3 JAR (`DATA_DIR=%TEMP%\rr-release-browser-smoke`, port 3127) returned `/health` 200, `/api/status` with `mapAvailable: true`, and a public manifest/image. Headless Chrome was opened at 1440×1000 and 390×844. The real map screenshot showed textured paths/walls, elevation shading, and magenta unsupported-block diagnostics; this visual check does not prove every water or partial block surface is rendered correctly. On narrow width the legend now starts closed with a separate reopen control, leaving the map visible; screenshot-only inspection did not exercise the button or prove Fit floor activation.
+- Docker acceptance remains open: `docker version` sees client 29.5.3 but cannot connect to the Engine (`permission denied` on `npipe:////./pipe/docker_engine`). No Compose container, volume-rebuild persistence, in-container health check, or Docker password override was exercised. Chrome was headless; touch pan/pinch, keyboard navigation, drawer close/reopen interaction, Fit floor operation, and editor map-position preservation were not manually exercised. Keep this ticket in progress until those environment-dependent checks are completed.
+- No external hosting resources were provisioned. No separate local authoring tool or draft/publish workflow was introduced; schematic upload files are removed after import, and backups do not contain the password or source schematic.
 

@@ -8,6 +8,8 @@ services:
       DATA_DIR: /data
       MINECRAFT_CLIENT_JAR: /seed-assets/minecraft-client.jar
       EDITOR_PASSWORD: ${EDITOR_PASSWORD:-relic-local}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
       - map-data:/data
       - ./assets:/seed-assets:ro

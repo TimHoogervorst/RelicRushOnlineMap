@@ -70,4 +70,16 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #block-properties select { min-width: 110px; margin: 0; }
 #block-inspector { border-top: 1px solid #303a34; margin-top: 8px; padding-top: 6px; }
 #block-inspector[hidden] { display: none; }
-@media (max-width: 600px) { .toolbar { height: 58px; gap: 10px; padding: 0 12px; } .brand strong { font-size: 12px; } .brand small, .floor-picker { display: none; } #viewport { height: calc(100vh - 58px); } .actions { gap: 5px; } button { height: 32px; } }
+@media (max-width: 600px) {
+  .toolbar { height: 58px; gap: 8px; padding: 0 10px; }
+  .brand { gap: 7px; min-width: 0; margin-right: 0; }
+  .brand .mark { width: 30px; height: 30px; }
+  .brand strong { font-size: 11px; }
+  .brand small, .floor-picker, #zoom-out, #zoom-in { display: none !important; }
+  #viewport { height: calc(100vh - 58px); }
+  .actions { position: static; gap: 5px; }
+  #fit { position: fixed; right: 58px; top: 12px; width: 72px; padding: 0 7px; font-size: 11px; white-space: nowrap; }
+  #edit-mode { position: fixed; right: 10px; top: 12px; width: 42px; padding: 0 5px; font-size: 11px; }
+  .sidebar { left: 10px; right: 10px; top: 68px; bottom: 10px; width: auto; max-width: 320px; padding: 14px; }
+  .sidebar-reopen { left: 10px; top: 68px; }
+}
