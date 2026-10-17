@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../src/server.js';
-import { encodeSectionChunks, importSchematicSection, openProject, readSectionBlock, readSectionBlocks, saveBlock, snapshotProject } from '../src/project-store.js';
+import { encodeSectionChunks, importSchematicSection, moveSectionBlocks, openProject, projectRevision, readSectionBlock, readSectionBlocks, saveBlock, snapshotProject } from '../src/project-store.js';
 import { decodeLitematic } from '../src/litematic.js';
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1]);
@@ -19,6 +19,69 @@ function sectionDb(path = ':memory:') {
   db.prepare("UPDATE project_meta SET value='1' WHERE key='revision'").run();
   return db;
 }
+
+test('group block move is atomic across negative Y and chunk boundaries and carries block entities', () => {
+  const db = sectionDb();
+  try {
+    saveBlock(db, { sectionId: 'section-1', x: 15, y: -1, z: 15, state: { id: 'minecraft:chest', properties: { facing: 'north', type: 'single', waterlogged: 'false' } } }, 1);
+    const before = snapshotProject(db).floors[0];
+    const moved = moveSectionBlocks(db, { sectionId: 'section-1', blocks: [{ x: 0, y: 0, z: 0 }, { x: 15, y: -1, z: 15 }], dy: -2 }, 2);
+    assert.equal(moved.revision, 3);
+    assert.equal(readSectionBlock(db, 'section-1', 0, -2, 0).id, 'minecraft:chest');
+    assert.equal(readSectionBlock(db, 'section-1', 0, -2, 0).blockEntities[0].Items[0].Slot, 0);
+    assert.equal(readSectionBlock(db, 'section-1', 15, -1, 15), null);
+    const after = snapshotProject(db).floors[0];
+    assert.deepEqual(after.sections[0].placementX, before.sections[0].placementX);
+    assert.deepEqual(after.sections[0].placementZ, before.sections[0].placementZ);
+    assert.deepEqual(after.markers, before.markers);
+    assert.equal(after.blocks.length, before.blocks.length);
+  } finally { db.close(); }
+});
+
+test('group block move permits source/destination overlap but rejects outside collisions without mutation', () => {
+  const db = sectionDb();
+  try {
+    saveBlock(db, { sectionId: 'section-1', x: 0, y: 1, z: 0, state: { id: 'minecraft:stone', properties: {} } }, 1);
+    assert.equal(moveSectionBlocks(db, { sectionId: 'section-1', blocks: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }], dy: 1 }, 2).revision, 3);
+    assert.equal(readSectionBlock(db, 'section-1', 0, 1, 0).id, 'minecraft:chest');
+    assert.equal(readSectionBlock(db, 'section-1', 0, 2, 0).id, 'minecraft:stone');
+    const revision = projectRevision(db);
+    assert.throws(() => moveSectionBlocks(db, { sectionId: 'section-1', blocks: [{ x: 0, y: 1, z: 0 }], dy: 1 }, revision), /collision/i);
+    assert.equal(readSectionBlock(db, 'section-1', 0, 1, 0).id, 'minecraft:chest');
+    assert.equal(projectRevision(db), revision);
+  } finally { db.close(); }
+});
+
+test('group move route regenerates one atomic revision and undo/redo restore the full selection', async t => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-group-move-'));
+  const db = sectionDb(path.join(dataDir, 'project.sqlite')); db.close();
+  const rendered = [];
+  const renderer = { async render({ output, schematic }) { rendered.push(schematic.blocks); await writeFile(output, png); return { width: 64, height: 64, bounds: { width: 4, depth: 4 }, renderer: { pixelSize: 16 }, blockCount: schematic.blocks.length }; } };
+  const { server, origin } = await listen(createApp({ dataDir, password: 'secret', initializeWorker: false, renderer }));
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(dataDir, { recursive: true, force: true }); });
+  const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
+  const headers = { cookie: login.headers.get('set-cookie').split(';')[0], origin, 'content-type': 'application/json' };
+  assert.equal((await fetch(`${origin}/api/generation/save`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1 }) })).status, 200);
+  const slice = await fetch(`${origin}/api/project/preview?floor=floor-1&maxY=-1`, { headers });
+  assert.equal(slice.status, 200); assert.equal(slice.headers.get('content-type').split(';')[0], 'image/png'); assert.equal(rendered.at(-1).length, 0, 'height preview omits upper geometry for display');
+  const revisionBeforeMove = openProject(path.join(dataDir, 'project.sqlite'));
+  try { assert.equal(projectRevision(revisionBeforeMove), 1, 'slice preview does not mutate project data'); } finally { revisionBeforeMove.close(); }
+  const move = await fetch(`${origin}/api/project/block-moves`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1, sectionId: 'section-1', blocks: [{ x: 0, y: 0, z: 0 }], dy: -1 }) });
+  assert.equal(move.status, 200, (await move.clone().json()).error); assert.equal((await move.json()).revision, 2);
+  const heights = await fetch(`${origin}/api/project/height-range?floor=floor-1`, { headers }).then(response => response.json());
+  assert.deepEqual(heights, { minY: -1, maxY: 0 });
+  const undo = await fetch(`${origin}/api/project/blocks/undo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 2 }) });
+  assert.equal(undo.status, 200); assert.equal((await undo.json()).revision, 3);
+  const redo = await fetch(`${origin}/api/project/blocks/redo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 3 }) });
+  assert.equal(redo.status, 200); assert.equal((await redo.json()).revision, 4);
+  const reopened = openProject(path.join(dataDir, 'project.sqlite'));
+  try {
+    assert.equal(readSectionBlock(reopened, 'section-1', 0, -1, 0).id, 'minecraft:chest');
+    const floor = snapshotProject(reopened).floors[0];
+    assert.deepEqual([floor.sections[0].placementX, floor.sections[0].placementZ], [0, 0]);
+    assert.equal(readSectionBlock(reopened, 'section-1', 0, 0, 0), null);
+  } finally { reopened.close(); }
+});
 
 test('palette chunks round-trip negative coordinates and block entities; expansion keeps section-local origin', () => {
   const db = sectionDb();
@@ -62,6 +125,26 @@ test('real starting fixture supports stair/slab refinement and decoration remova
     assert.equal(readSectionBlock(db, imported.sectionId, decoration.x, decoration.y, decoration.z), null);
     assert.equal(db.prepare('SELECT placement_x FROM sections WHERE id=?').get(imported.sectionId).placement_x, 0);
     assert.deepEqual(await readFile(fixture), bytes, 'editing copied palette chunks does not rewrite or depend on the input file');
+  } finally { db.close(); }
+});
+
+test('group movement of a real fixture block entity extends height without moving section or marker anchors', async () => {
+  const schematic = decodeLitematic(await readFile(new URL('../schematics/Start 0F.litematic', import.meta.url)));
+  const db = sectionDb();
+  try {
+    db.prepare('DELETE FROM sections WHERE id=?').run('section-1');
+    const imported = importSchematicSection(db, schematic, { sectionName: 'Fixture' });
+    db.prepare('INSERT INTO markers(id,section_id,type,name,description,x,z) VALUES(?,?,?,?,?,?,?)').run('anchor', imported.sectionId, 'chest', 'Fixture marker', '', 2.5, 3.5);
+    const entity = schematic.regions[0].blockEntities.find(item => readSectionBlock(db, imported.sectionId, item.x, item.y, item.z) && !readSectionBlock(db, imported.sectionId, item.x, item.y + 1, item.z));
+    assert.ok(entity, 'fixture has a block entity with an empty cell above it');
+    const before = snapshotProject(db).floors[0];
+    const result = moveSectionBlocks(db, { sectionId: imported.sectionId, blocks: [{ x: entity.x, y: entity.y, z: entity.z }], dy: 1 }, projectRevision(db));
+    const after = snapshotProject(db).floors[0];
+    const moved = readSectionBlock(db, imported.sectionId, entity.x, entity.y + 1, entity.z);
+    assert.equal(moved.blockEntities[0].y, entity.y + 1);
+    assert.deepEqual(after.sections.map(({ placementX, placementZ, labelX, labelZ }) => [placementX, placementZ, labelX, labelZ]), before.sections.map(({ placementX, placementZ, labelX, labelZ }) => [placementX, placementZ, labelX, labelZ]));
+    assert.deepEqual(after.markers, before.markers);
+    assert.equal(result.after.length, 1);
   } finally { db.close(); }
 });
 

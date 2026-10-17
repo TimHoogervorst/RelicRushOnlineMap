@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -130,6 +130,16 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     try { res.json({ revision: projectRevision(db), floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
     finally { db.close(); }
   });
+  app.get('/api/project/height-range', requireEditor, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const floor = snapshotProject(db).floors.find(item => item.id === req.query.floor);
+      if (!floor) return res.status(404).json({ error: 'Floor does not exist.' });
+      let minY = 0, maxY = 0;
+      for (const block of floor.blocks) { minY = Math.min(minY, block.y); maxY = Math.max(maxY, block.y); }
+      res.json({ minY, maxY });
+    } finally { db.close(); }
+  });
   app.get('/api/project/sections/:id/blocks', requireEditor, async (req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {
@@ -137,6 +147,20 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       if (!section) return res.status(404).json({ error: 'Section does not exist.' });
       res.json({ revision: projectRevision(db), section: { ...section, bounds: JSON.parse(section.bounds_json) }, blocks: readSectionBlocks(db, section.id) });
     } finally { db.close(); }
+  });
+  app.get('/api/project/preview', requireEditor, async (req, res) => {
+    const maxY = Number(req.query.maxY), floorId = String(req.query.floor ?? '');
+    if (!Number.isSafeInteger(maxY) || Math.abs(maxY) > 1_000_000 || !floorId) return res.status(400).json({ error: 'Choose a floor and whole-block height.' });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    const temporary = path.join(dataDir, `slice-preview-${randomBytes(12).toString('hex')}.png`);
+    try {
+      const floor = snapshotProject(db).floors.find(item => item.id === floorId);
+      if (!floor) return res.status(404).json({ error: 'Floor does not exist.' });
+      const assets = process.env.MINECRAFT_ASSETS ? path.resolve(process.env.MINECRAFT_ASSETS) : path.join(dataDir, 'assets', 'minecraft');
+      await (renderer ?? { render: renderInWorker }).render({ schematic: { dimensions: floor.dimensions, blocks: floor.blocks.filter(block => block.y <= maxY) }, assets, output: temporary });
+      res.type('png').set('Cache-Control', 'no-store').sendFile(temporary, error => { void rm(temporary, { force: true }); if (error && !res.headersSent) res.status(500).end(); });
+    } catch (error) { await rm(temporary, { force: true }); res.status(500).json({ error: error.message }); }
+    finally { db.close(); }
   });
   app.get('/api/project/block-palette', requireEditor, async (_req, res) => {
     try {
@@ -199,6 +223,20 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });
+  app.post('/api/project/block-moves', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const command = moveSectionBlocks(db, req.body, req.body.expectedRevision);
+      const token = getSession(req).token, history = blockHistory.get(token) ?? { undo: [], redo: [] };
+      command.kind = 'selection-move'; history.undo.push(command); if (history.undo.length > 100) history.undo.shift(); history.redo = []; blockHistory.set(token, history);
+      try { const saved = await generation.save(snapshotProject(db)); return res.status(200).json({ ...command, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...command, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning section|collision|selected block/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
   for (const direction of ['undo', 'redo']) app.post(`/api/project/blocks/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
     const token = getSession(req).token, history = blockHistory.get(token) ?? { undo: [], redo: [] };
     const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'];
@@ -207,12 +245,14 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {
       if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
-      const result = restoreBlock(db, command, direction, req.body.expectedRevision);
+      const result = command.kind === 'selection-move'
+        ? restoreBlockMove(db, command, direction, req.body.expectedRevision)
+        : restoreBlock(db, command, direction, req.body.expectedRevision);
       source.pop(); target.push(command); blockHistory.set(token, history);
       try { const saved = await generation.save(snapshotProject(db)); res.json({ ...result, saved: true, status: generation.queue.status }); }
       catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
     } catch (error) {
-      const status = /another editor tab|does not exist/i.test(error.message) ? 409 : 400;
+      const status = /another editor tab|does not exist|collision|changed since this history/i.test(error.message) ? 409 : 400;
       res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });

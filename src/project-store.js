@@ -272,6 +272,103 @@ export function saveBlock(db, { sectionId, x, y, z, state = null, blockEntities 
   return { sectionId, x, y, z, state: next, before: before && { id: before.id, properties: before.properties }, revision: expectedRevision + 1 };
 }
 
+const cellKey = block => `${block.x},${block.y},${block.z}`;
+function chunkKeyAt({ x, y, z }) { return `${Math.floor(x / 16)},${Math.floor(y / 16)},${Math.floor(z / 16)}`; }
+function emptyChunk() { return { version: 1, palette: [{ id: 'minecraft:air', properties: {} }], indices: new Array(4096).fill(0), blockEntities: [] }; }
+function mutableChunk(db, sectionId, position, chunks) {
+  const key = chunkKeyAt(position);
+  if (!chunks.has(key)) {
+    const [cx, cy, cz] = key.split(',').map(Number);
+    const row = db.prepare('SELECT blob FROM section_chunks WHERE section_id=? AND chunk_x=? AND chunk_y=? AND chunk_z=?').get(sectionId, cx, cy, cz);
+    chunks.set(key, row ? decodeChunkBlob(row.blob) : emptyChunk());
+  }
+  return chunks.get(key);
+}
+function stateAt(chunk, position) {
+  const index = localIndex(((position.x % 16) + 16) % 16, ((position.y % 16) + 16) % 16, ((position.z % 16) + 16) % 16);
+  return { index, state: chunk.palette[chunk.indices[index]] };
+}
+function placeInChunk(chunk, position, state, entities) {
+  let paletteIndex = chunk.palette.findIndex(item => item.id === state.id && JSON.stringify(item.properties ?? {}) === JSON.stringify(state.properties ?? {}));
+  if (paletteIndex < 0) { paletteIndex = chunk.palette.length; chunk.palette.push({ id: state.id, properties: state.properties ?? {} }); }
+  const { index } = stateAt(chunk, position);
+  chunk.indices[index] = paletteIndex;
+  chunk.blockEntities.push(...entities.map(entity => ({ ...entity, x: position.x, y: position.y, z: position.z })));
+}
+
+/** Move an occupied block selection as one revision, preserving block entities and section anchors. */
+export function moveSectionBlocks(db, { sectionId, blocks, dy }, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (!Array.isArray(blocks) || !blocks.length || blocks.length > 100_000 || !Number.isSafeInteger(dy) || dy === 0 || Math.abs(dy) > 1_000_000) throw new Error('Choose a nonempty block selection and a whole-block vertical offset.');
+  if (!db.prepare('SELECT 1 FROM sections WHERE id=?').get(sectionId)) throw new Error('Choose an existing owning section.');
+  const unique = new Map();
+  for (const pos of blocks) {
+    if (![pos?.x, pos?.y, pos?.z].every(value => Number.isSafeInteger(value) && Math.abs(value) <= 1_000_000)) throw new Error('Block coordinates must be whole numbers within the supported range.');
+    unique.set(cellKey(pos), { x: pos.x, y: pos.y, z: pos.z });
+  }
+  const before = [...unique.values()].map(pos => {
+    const block = readSectionBlock(db, sectionId, pos.x, pos.y, pos.z);
+    if (!block) throw new Error(`Selected block at ${cellKey(pos)} no longer exists.`);
+    return block;
+  });
+  const after = before.map(block => ({ ...block, y: block.y + dy }));
+  if (after.some(block => !Number.isSafeInteger(block.y) || Math.abs(block.y) > 1_000_000)) throw new Error('Moved blocks exceed supported coordinates.');
+  const sources = new Set(before.map(cellKey));
+  for (const target of after) {
+    const current = readSectionBlock(db, sectionId, target.x, target.y, target.z);
+    if (current && !sources.has(cellKey(target))) throw new Error(`Move collision at ${cellKey(target)}.`);
+  }
+  applyBlockMove(db, sectionId, before, after, expectedRevision);
+  return { sectionId, before, after, revision: expectedRevision + 1 };
+}
+
+/** Restore a recorded selection move in one transaction for undo or redo. */
+export function restoreBlockMove(db, command, direction, expectedRevision) {
+  if (direction !== 'undo' && direction !== 'redo') throw new Error('Choose undo or redo.');
+  const from = direction === 'undo' ? command.after : command.before;
+  const to = direction === 'undo' ? command.before : command.after;
+  if (!Array.isArray(from) || !Array.isArray(to) || from.length !== to.length) throw new Error('Invalid block move history.');
+  for (const block of from) {
+    const current = readSectionBlock(db, command.sectionId, block.x, block.y, block.z);
+    if (!current || current.id !== block.id || JSON.stringify(current.properties) !== JSON.stringify(block.properties)) throw new Error('Moved blocks changed since this history action.');
+  }
+  const sources = new Set(from.map(cellKey));
+  for (const block of to) {
+    const current = readSectionBlock(db, command.sectionId, block.x, block.y, block.z);
+    if (current && !sources.has(cellKey(block))) throw new Error(`Move collision at ${cellKey(block)}.`);
+  }
+  applyBlockMove(db, command.sectionId, from, to, expectedRevision);
+  return { sectionId: command.sectionId, revision: expectedRevision + 1 };
+}
+
+function applyBlockMove(db, sectionId, from, to, expectedRevision) {
+  const chunks = new Map();
+  const entities = new Map();
+  for (const block of from) {
+    const chunk = mutableChunk(db, sectionId, block, chunks), { index } = stateAt(chunk, block);
+    entities.set(cellKey(block), chunk.blockEntities.filter(entity => entity.x === block.x && entity.y === block.y && entity.z === block.z));
+    chunk.blockEntities = chunk.blockEntities.filter(entity => entity.x !== block.x || entity.y !== block.y || entity.z !== block.z);
+    chunk.indices[index] = 0;
+  }
+  for (let i = 0; i < to.length; i++) {
+    const block = to[i], chunk = mutableChunk(db, sectionId, block, chunks);
+    placeInChunk(chunk, block, from[i], entities.get(cellKey(from[i])) ?? []);
+  }
+  const tx = db.transaction(() => {
+    for (const [key, chunk] of chunks) {
+      const [cx, cy, cz] = key.split(',').map(Number);
+      db.prepare(`INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,1,?)
+        ON CONFLICT(section_id,chunk_x,chunk_y,chunk_z) DO UPDATE SET format_version=1,blob=excluded.blob`)
+        .run(sectionId, cx, cy, cz, gzipSync(Buffer.from(JSON.stringify(chunk))));
+    }
+    const bounds = JSON.parse(db.prepare('SELECT bounds_json FROM sections WHERE id=?').get(sectionId).bounds_json);
+    for (const block of to) { bounds.x = Math.max(bounds.x, block.x + 1); bounds.y = Math.max(bounds.y, block.y + 1); bounds.z = Math.max(bounds.z, block.z + 1); }
+    db.prepare('UPDATE sections SET bounds_json=? WHERE id=?').run(JSON.stringify(bounds), sectionId);
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+}
+
 export function restoreBlock(db, command, direction, expectedRevision) {
   const target = direction === 'undo' ? command.before : command.after;
   return saveBlock(db, { sectionId: command.sectionId, x: command.x, y: command.y, z: command.z, state: target && { id: target.id, properties: target.properties }, blockEntities: target?.blockEntities ?? [] }, expectedRevision);

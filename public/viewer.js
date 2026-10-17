@@ -7,7 +7,7 @@ const legendPanel = document.querySelector('#legend-panel');
 const editorPanel = document.querySelector('#editor-panel');
 const loginPanel = document.querySelector('#login-panel');
 const setupPanel = document.querySelector('#setup-panel');
-let zoom = 1, offsetX = 0, offsetY = 0, pointer = null;
+let zoom = 1, offsetX = 0, offsetY = 0, pointer = null, slicePreviewActive = false;
 
 function drawTransform() { frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`; }
 function fitFloor() {
@@ -24,16 +24,25 @@ function setZoom(value, anchorX = viewport.clientWidth / 2, anchorY = viewport.c
 document.querySelector('#fit').addEventListener('click', fitFloor);
 document.querySelector('#zoom-in').addEventListener('click', () => setZoom(zoom * 1.25));
 document.querySelector('#zoom-out').addEventListener('click', () => setZoom(zoom / 1.25));
-viewport.addEventListener('wheel', event => { event.preventDefault(); setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY); }, { passive: false });
-viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
+viewport.addEventListener('wheel', event => {
+  event.preventDefault();
+  if (event.altKey && editorOpen && editorAuthenticated && selectedBlocks.length) {
+    pendingMoveDelta += event.deltaY > 0 ? 1 : -1; renderSelection();
+    document.querySelector('#block-selection-status').textContent = `Preview: move ${selectedBlocks.length} blocks ${pendingMoveDelta > 0 ? 'up' : 'down'} ${Math.abs(pendingMoveDelta)} block${Math.abs(pendingMoveDelta) === 1 ? '' : 's'}. Click Move selection to commit.`;
+    return;
+  }
+  setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
+}, { passive: false });
+viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
 viewport.addEventListener('pointermove', event => { if (!pointer || pointer.id !== event.pointerId) return; if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 4) pointer.moved = true; offsetX += event.clientX - pointer.x; offsetY += event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; drawTransform(); });
-function endPointer(event) { if (pointer?.id === event.pointerId) { const click = !pointer.moved, target = pointer.target; pointer = null; frame.classList.remove('dragging'); if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY); } }
+function endPointer(event) { if (pointer?.id === event.pointerId) { const click = !pointer.moved, target = pointer.target, shiftKey = pointer.shiftKey; pointer = null; frame.classList.remove('dragging'); if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY, shiftKey); } }
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
-image.addEventListener('load', fitFloor);
+image.addEventListener('load', () => { if (!slicePreviewActive) fitFloor(); renderSelection(); });
 
-let editorOpen = false, sidebarOpen = true, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null;
+let editorOpen = false, editorAuthenticated = false, sidebarOpen = true, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null;
 let initialMarkerSection = null, initialMarkerDisplay = null;
 let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
+let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
 const markerTypes = ['chest', 'relic', 'shop', 'stairs', 'other'];
 const markerTitles = { chest: 'Chests', relic: 'Relics', shop: 'Shops', stairs: 'Stairs', other: 'Other' };
 const markerIcon = type => `/icons/${markerTypes.includes(type) ? type : 'other'}.svg`;
@@ -62,11 +71,55 @@ async function loadFloor(floorId) {
   const response = await fetch(`/api/map/manifest?floor=${encodeURIComponent(floorId)}`, { cache: 'no-store' });
   if (!response.ok) throw new Error('The saved floor is unavailable.');
   floorManifest = await response.json();
+  slicePreviewActive = false;
+  if (editorAuthenticated) {
+    const rangeResponse = await fetch(`/api/project/height-range?floor=${encodeURIComponent(floorId)}`);
+    if (rangeResponse.ok) {
+      const range = await rangeResponse.json(), slider = document.querySelector('#block-slice');
+      slider.min = String(Math.min(-1, range.minY)); slider.max = String(Math.max(1, range.maxY));
+      sliceMaximum = Number(slider.max); visibleHeight = sliceMaximum; slider.value = String(sliceMaximum);
+    }
+  }
   image.src = `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorId)}`;
   image.hidden = false; message.hidden = true;
   const sections = (floorManifest.sections ?? []).map(section => section.name).join(' · ');
   document.querySelector('#caption').textContent = `${sections || floorManifest.name} · ${floorManifest.name} · ${floorManifest.bounds.width} × ${floorManifest.bounds.depth}`;
   renderMarkers();
+}
+function renderSelection() {
+  const svg = document.querySelector('#block-selection');
+  if (!svg || !floorManifest) return;
+  const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1;
+  svg.setAttribute('viewBox', `0 0 ${image.naturalWidth || image.width} ${image.naturalHeight || image.height}`);
+  svg.replaceChildren();
+  const section = inspectedSection;
+  if (!section) return;
+  for (const [list, className] of [[selectedBlocks, 'block-selection-cell'], [pendingMoveDelta ? selectedBlocks : [], 'block-selection-proposed']]) {
+    for (const block of list) {
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', String((block.x + section.placementX) * pixels));
+      rect.setAttribute('y', String((depth - 1 - block.z - section.placementZ) * pixels));
+      rect.setAttribute('width', String(pixels)); rect.setAttribute('height', String(pixels)); rect.setAttribute('class', className); svg.append(rect);
+    }
+  }
+  const ys = selectedBlocks.map(block => block.y);
+  document.querySelector('#block-selection-status').textContent = selectedBlocks.length
+    ? `${selectedBlocks.length} selected · local Y ${Math.min(...ys)} to ${Math.max(...ys)}${pendingMoveDelta ? ` · proposed Y ${Math.min(...ys) + pendingMoveDelta} to ${Math.max(...ys) + pendingMoveDelta}` : ''}`
+    : 'No group selected.';
+  document.querySelector('#block-commit-move').disabled = !selectedBlocks.length || !pendingMoveDelta;
+  document.querySelector('#block-cancel-move').hidden = !pendingMoveDelta;
+}
+function updateSlicePreview() {
+  visibleHeight = Number(document.querySelector('#block-slice').value);
+  document.querySelector('#block-slice-value').textContent = visibleHeight >= sliceMaximum ? 'All' : `Y ≤ ${visibleHeight}`;
+  if (!editorAuthenticated || !floorManifest) return;
+  clearTimeout(slicePreviewTimer);
+  slicePreviewTimer = setTimeout(() => {
+    slicePreviewActive = visibleHeight < sliceMaximum;
+    image.src = slicePreviewActive
+      ? `/api/project/preview?floor=${encodeURIComponent(floorManifest.id)}&maxY=${visibleHeight}&nonce=${Date.now()}`
+      : `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorManifest.id)}`;
+  }, 250);
 }
 document.querySelector('#floor').addEventListener('change', event => loadFloor(event.target.value).catch(error => { message.textContent = error.message; message.hidden = false; }));
 function renderSidebar() {
@@ -131,12 +184,20 @@ function blockTargetAt(clientX, clientY) {
   if (!section) return null;
   return { section, x: screenX - section.placementX, y: 0, z: depth - 1 - screenZ - section.placementZ, screenX, screenZ };
 }
-async function inspectBlockAt(clientX, clientY) {
+async function inspectBlockAt(clientX, clientY, additive = false) {
   const target = blockTargetAt(clientX, clientY); if (!target) return;
   try {
     const response = await fetch(`/api/project/sections/${encodeURIComponent(target.section.id)}/blocks`); const data = await response.json();
     if (!response.ok) throw new Error(data.error);
-    const top = data.blocks.filter(block => block.x + target.section.placementX === target.screenX && floorManifest.bounds.depth - 1 - block.z - target.section.placementZ === target.screenZ).sort((a, b) => b.y - a.y)[0] ?? null;
+    const top = data.blocks.filter(block => block.y <= visibleHeight && block.x + target.section.placementX === target.screenX && floorManifest.bounds.depth - 1 - block.z - target.section.placementZ === target.screenZ).sort((a, b) => b.y - a.y)[0] ?? null;
+    if (!additive || inspectedSection?.id !== target.section.id) { selectedBlocks = []; pendingMoveDelta = 0; }
+    inspectedSection = target.section;
+    if (top) {
+      const key = `${top.x},${top.y},${top.z}`, existing = selectedBlocks.findIndex(block => `${block.x},${block.y},${block.z}` === key);
+      if (additive && existing >= 0) selectedBlocks.splice(existing, 1);
+      else if (!additive || existing < 0) selectedBlocks.push(top);
+    }
+    renderSelection();
     const x = top?.x ?? target.x, z = top?.z ?? target.z;
     inspectedSection = target.section; inspectedCoords = { sectionId: target.section.id, x, y: top?.y ?? 0, z };
     inspectedBlock = top; document.querySelector('#block-inspector').hidden = false;
@@ -170,6 +231,24 @@ async function blockHistoryCommand(direction) {
 }
 document.querySelector('#block-undo').addEventListener('click', () => void blockHistoryCommand('undo'));
 document.querySelector('#block-redo').addEventListener('click', () => void blockHistoryCommand('redo'));
+document.querySelector('#block-slice').addEventListener('input', updateSlicePreview);
+document.querySelector('#block-clear-selection').addEventListener('click', () => { selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); });
+document.querySelector('#block-cancel-move').addEventListener('click', () => { pendingMoveDelta = 0; renderSelection(); });
+document.querySelector('#block-commit-move').addEventListener('click', async () => {
+  if (!selectedBlocks.length || !pendingMoveDelta || !inspectedSection) return;
+  const status = document.querySelector('#block-selection-status'); status.textContent = 'Moving selected blocks and regenerating the floor…';
+  const response = await fetch('/api/project/block-moves', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, sectionId: inspectedSection.id, blocks: selectedBlocks.map(({ x, y, z }) => ({ x, y, z })), dy: pendingMoveDelta }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  if (!result.saved) { status.textContent = `Move retained; ${result.warning}. Use Save to retry.`; return; }
+  const floorId = document.querySelector('#floor').value;
+  await loadFloor(floorId);
+  selectedBlocks = result.after; inspectedSection = floorManifest.sections.find(item => item.id === result.sectionId) ?? null; pendingMoveDelta = 0;
+  if (inspectedSection) { const block = selectedBlocks[0]; inspectedCoords = { sectionId: result.sectionId, x: block.x, y: block.y, z: block.z }; inspectedBlock = block; }
+  if (visibleHeight < sliceMaximum) updateSlicePreview(); else renderSelection();
+  await refreshSaveStatus();
+});
 viewport.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('application/x-minecraft-block')) event.preventDefault(); });
 viewport.addEventListener('drop', async event => {
   const id = event.dataTransfer.getData('application/x-minecraft-block'); if (!id || !editorOpen) return;
@@ -342,6 +421,7 @@ document.querySelector('#popup-close').addEventListener('click', () => { documen
 async function refreshSession() {
   const response = await fetch('/api/auth/session', { cache: 'no-store' });
   const state = await response.json();
+  editorAuthenticated = state.authenticated;
   loginPanel.hidden = state.authenticated;
   setupPanel.hidden = !state.authenticated;
   if (state.authenticated) {
@@ -357,7 +437,8 @@ async function refreshSession() {
     for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
     document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
     await refreshSaveStatus();
-  }
+    if (visibleHeight < 256 && floorManifest) updateSlicePreview();
+  } else { slicePreviewActive = false; selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); }
 }
 document.querySelector('#edit-mode').addEventListener('click', async () => {
   editorOpen = !editorOpen;

@@ -19,6 +19,10 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #map-frame { position: absolute; left: 50%; top: 50%; transform-origin: center; will-change: transform; cursor: grab; }
 #map-frame.dragging { cursor: grabbing; }
 #map { display: block; image-rendering: pixelated; max-width: none; box-shadow: 0 22px 60px #0009; border: 1px solid #697267; }
+#block-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.block-selection-cell { fill: #d8f28a55; stroke: #e7ff9a; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.block-selection-proposed { fill: #65e5b044; stroke: #74f3c1; stroke-width: 2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; }
+#block-selection-status { min-height: 22px; padding: 7px; background: #202825; border-radius: 5px; color: #d5e2cb; font: 11px 'DM Mono', monospace; }
 #message { position: absolute; inset: 0; display: grid; place-items: center; margin: auto; color: #b4bcae; font-size: 13px; text-align: center; padding: 30px; pointer-events: none; }
 #message[hidden] { display: none; }
 .sidebar { position: fixed; z-index: 4; left: 14px; top: 82px; bottom: 14px; width: 278px; overflow: auto; padding: 18px; background: #171d1bf2; border: 1px solid #354038; border-radius: 8px; box-shadow: 0 16px 50px #0008; }
