@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
@@ -14,7 +15,7 @@ async function fixture(t, options = {}) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(dataDir, { recursive: true, force: true }); });
-  return { origin };
+  return { origin, dataDir };
 }
 
 function zip(entries) {
@@ -84,6 +85,23 @@ test('asset upload requires authentication and origin validation', async t => {
   assert.equal(csrf.status, 403);
   const hiddenData = await fetch(`${origin}/api/backups/latest`, { headers: { cookie: `${cookie.slice(0, cookie.indexOf('='))}=invalid` } });
   assert.equal(hiddenData.status, 401);
+});
+
+test('authenticated owner imports a Litematic once and source upload is removed', async t => {
+  const { origin, dataDir } = await fixture(t);
+  assert.equal((await fetch(`${origin}/api/project/import`, { method: 'POST', body: 'bad' })).status, 401);
+  const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const bytes = await readFile(new URL('../schematics/Start 0F.litematic', import.meta.url));
+  const response = await fetch(`${origin}/api/project/import`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream', 'x-source-name': 'Start 0F.litematic', 'x-section-name': 'Cave', 'x-floor-name': 'Floor 3' }, body: bytes });
+  const payload = await response.json();
+  assert.equal(response.status, 201, payload.error);
+  const imported = payload;
+  assert.equal(imported.blockCount, 3484);
+  assert.equal(imported.createdFloor, true);
+  const floors = await fetch(`${origin}/api/project/floors`, { headers: { cookie } }).then(result => result.json());
+  assert.equal(floors.floors[0].name, 'Floor 3');
+  assert.equal((await readdir(dataDir)).some(name => name.startsWith('schematic-upload-')), false);
 });
 
 test('owner can upload version-checked assets and failed setup preserves configured metadata', async t => {

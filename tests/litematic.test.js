@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { decodeLitematic, unpackPaletteIndices } from '../src/litematic.js';
-import { decodeChunkBlob, encodeSectionChunks, openProject, readSectionBlocks, seedInitialProject } from '../src/project-store.js';
+import { decodeChunkBlob, encodeSectionChunks, openProject, readSectionBlocks, seedInitialProject, importSchematicSection } from '../src/project-store.js';
 import { renderOrthographic } from '../src/renderer.js';
 
 test('packed palette indices can cross long boundaries', () => {
@@ -57,6 +57,51 @@ test('first fixture import persists once to SQLite and reopens from chunks', asy
     database.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('imports multiple regions in shared normalized coordinates with states and block entities', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rr-map-import-'));
+  const db = openProject(path.join(dir, 'project.sqlite'));
+  try {
+    const imported = importSchematicSection(db, {
+      version: 7, subVersion: 1, dataVersion: 5023,
+      regions: [
+        { name: 'west', min: { x: -4, y: 2, z: 8 }, dimensions: { x: 2, y: 1, z: 1 }, blocks: [{ x: 1, y: 0, z: 0, id: 'minecraft:oak_stairs', properties: { facing: 'west' } }], blockEntities: [{ x: 1, y: 0, z: 0, id: 'minecraft:sign' }] },
+        { name: 'east', min: { x: 2, y: 2, z: 8 }, dimensions: { x: 1, y: 1, z: 1 }, blocks: [{ x: 0, y: 0, z: 0, id: 'minecraft:gold_block', properties: {} }], blockEntities: [] }
+      ]
+    }, { floorName: 'Floor 2', sectionName: 'Imported' });
+    assert.equal(imported.createdFloor, true);
+    assert.deepEqual(readSectionBlocks(db, imported.sectionId).map(({ x, id }) => [x, id]), [[1, 'minecraft:oak_stairs'], [6, 'minecraft:gold_block']]);
+    const entities = db.prepare('SELECT blob FROM section_chunks WHERE section_id=?').all(imported.sectionId).flatMap(row => decodeChunkBlob(row.blob).blockEntities);
+    assert.equal(entities[0].x, 1);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fixture block entities remain aligned with their blocks after section import', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rr-map-entity-import-'));
+  const db = openProject(path.join(dir, 'project.sqlite'));
+  try {
+    const schematic = decodeLitematic(await readFile(new URL('../schematics/Start 0F.litematic', import.meta.url)));
+    const imported = importSchematicSection(db, schematic, { floorName: 'Fixture', sectionName: 'Fixture area' });
+    const expected = { x: 62, y: 10, z: 12 };
+    assert.ok(readSectionBlocks(db, imported.sectionId).some(block => block.x === expected.x && block.y === expected.y && block.z === expected.z && block.id === 'minecraft:decorated_pot'));
+    const storedEntities = db.prepare('SELECT blob FROM section_chunks WHERE section_id=?').all(imported.sectionId)
+      .flatMap(row => decodeChunkBlob(row.blob).blockEntities);
+    assert.ok(storedEntities.some(entity => entity.id === 'minecraft:decorated_pot' && entity.x === expected.x && entity.y === expected.y && entity.z === expected.z));
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('rejects conflicting occupied region placements without creating project rows', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rr-map-collision-'));
+  const db = openProject(path.join(dir, 'project.sqlite'));
+  const schematic = { version: 7, regions: [
+    { name: 'one', min: { x: 0, y: 0, z: 0 }, dimensions: { x: 1, y: 1, z: 1 }, blocks: [{ x: 0, y: 0, z: 0, id: 'minecraft:stone', properties: {} }], blockEntities: [] },
+    { name: 'two', min: { x: 0, y: 0, z: 0 }, dimensions: { x: 1, y: 1, z: 1 }, blocks: [{ x: 0, y: 0, z: 0, id: 'minecraft:dirt', properties: {} }], blockEntities: [] }
+  ] };
+  try {
+    assert.throws(() => importSchematicSection(db, schematic, { floorName: 'Floor 1', sectionName: 'Collision' }), /conflict.*one.*two/i);
+    assert.equal(db.prepare('SELECT count(*) count FROM floors').get().count, 0);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('decodes the supplied Litematic v7 fixture and normalizes negative Y extent', async () => {

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
 
 const CHUNK_SIZE = 16;
@@ -51,9 +52,12 @@ export function openProject(path) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS project_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS floors (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, floor_id TEXT NOT NULL REFERENCES floors(id), name TEXT NOT NULL, bounds_json TEXT NOT NULL, placement_x INTEGER NOT NULL DEFAULT 0, placement_z INTEGER NOT NULL DEFAULT 0, provenance_json TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, floor_id TEXT NOT NULL REFERENCES floors(id), name TEXT NOT NULL, bounds_json TEXT NOT NULL, placement_x INTEGER NOT NULL DEFAULT 0, placement_z INTEGER NOT NULL DEFAULT 0, label_x REAL NOT NULL DEFAULT 0, label_z REAL NOT NULL DEFAULT 0, provenance_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_chunks (section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE, chunk_x INTEGER NOT NULL, chunk_y INTEGER NOT NULL, chunk_z INTEGER NOT NULL, format_version INTEGER NOT NULL, blob BLOB NOT NULL, PRIMARY KEY(section_id, chunk_x, chunk_y, chunk_z));
   `);
+  const sectionColumns = new Set(db.pragma('table_info(sections)').map(column => column.name));
+  if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
+  if (!sectionColumns.has('label_z')) db.exec('ALTER TABLE sections ADD COLUMN label_z REAL NOT NULL DEFAULT 0');
   return db;
 }
 
@@ -92,4 +96,60 @@ export function readSectionBlocks(db, sectionId = 'section-start-0f') {
     }
   }
   return result;
+}
+
+/** Persist one decoded schematic as an independent section in a shared schematic coordinate frame. */
+export function importSchematicSection(db, schematic, { floorId = null, floorName = 'Floor 0', sectionName = 'Imported section' } = {}) {
+  if (!Array.isArray(schematic?.regions) || !schematic.regions.length) throw new Error('Litematic contains no regions to import');
+  if (typeof sectionName !== 'string' || !sectionName.trim() || sectionName.length > 120) throw new Error('Section name must contain 1–120 characters');
+  if (typeof floorName !== 'string' || !floorName.trim() || floorName.length > 120) throw new Error('Floor name must contain 1–120 characters');
+  const min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity };
+  for (const region of schematic.regions) for (const axis of ['x', 'y', 'z']) {
+    const lo = region.min?.[axis], size = region.dimensions?.[axis];
+    if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(size) || size < 1) throw new Error(`Invalid bounds in region ${region.name}`);
+    min[axis] = Math.min(min[axis], lo); max[axis] = Math.max(max[axis], lo + size);
+  }
+  const dimensions = { x: max.x - min.x, y: max.y - min.y, z: max.z - min.z };
+  const volume = dimensions.x * dimensions.y * dimensions.z;
+  if (!Number.isSafeInteger(volume) || volume > 16_000_000) throw new Error('Combined schematic dimensions exceed the 16 million block import limit');
+  const occupied = new Map(), blocks = [], entities = [];
+  for (const region of schematic.regions) {
+    for (const block of region.blocks ?? []) {
+      const placed = { ...block, x: block.x + region.min.x - min.x, y: block.y + region.min.y - min.y, z: block.z + region.min.z - min.z };
+      const key = `${placed.x},${placed.y},${placed.z}`;
+      const old = occupied.get(key);
+      if (old) {
+        if (old.id !== placed.id || JSON.stringify(old.properties ?? {}) !== JSON.stringify(placed.properties ?? {})) {
+          throw new Error(`Conflicting region placement at schematic cell ${key}: region ${old.region} has ${old.id}, region ${region.name} has ${placed.id}`);
+        }
+      } else { occupied.set(key, { ...placed, region: region.name }); blocks.push(placed); }
+    }
+    for (const entity of region.blockEntities ?? []) {
+      const copy = { ...entity };
+      // Tile entities use the region-local frame exposed by decodeLitematic, like decoded blocks.
+      for (const axis of ['x', 'y', 'z']) if (Number.isSafeInteger(copy[axis])) copy[axis] += region.min[axis] - min[axis];
+      entities.push(copy);
+    }
+  }
+  if (!blocks.length) throw new Error('Litematic contains no occupied blocks to import');
+  const sectionId = randomUUID();
+  const creatingFloor = !floorId;
+  const targetFloorId = floorId ?? randomUUID();
+  if (floorId && !db.prepare('SELECT 1 FROM floors WHERE id=?').get(floorId)) throw new Error('Selected floor does not exist');
+  const chunks = encodeSectionChunks(blocks, entities);
+  const tx = db.transaction(() => {
+    if (creatingFloor) {
+      const order = db.prepare('SELECT COALESCE(MAX(sort_order), -1)+1 AS next FROM floors').get().next;
+      db.prepare('INSERT INTO floors(id,name,sort_order) VALUES(?,?,?)').run(targetFloorId, floorName.trim(), order);
+    }
+    db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run(
+      sectionId, targetFloorId, sectionName.trim(), JSON.stringify(dimensions), 0, 0,
+      JSON.stringify({ litematicVersion: schematic.version, subVersion: schematic.subVersion, dataVersion: schematic.dataVersion, regionNames: schematic.regions.map(region => region.name) })
+    );
+    const insert = db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,?,?)');
+    for (const chunk of chunks) insert.run(sectionId, chunk.cx, chunk.cy, chunk.cz, 1, chunk.compressed);
+    db.prepare("INSERT OR REPLACE INTO project_meta(key,value) VALUES('schema_version','1'),('coordinate_contract','section-local x,y,z; chunks 16^3; index=(y*16+z)*16+x')").run();
+  });
+  tx();
+  return { floorId: targetFloorId, sectionId, createdFloor: creatingFloor, dimensions, blockCount: blocks.length, chunkCount: chunks.length };
 }

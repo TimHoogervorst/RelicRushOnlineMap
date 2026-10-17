@@ -1,6 +1,6 @@
 # 03 — Import a schematic into a saved floor and section
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -24,6 +24,12 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 - [02 — Unlock editing and configure Minecraft assets](02-login-and-asset-setup.md)
 
 ## Handoff
+
+Implemented authenticated one-time Litematic upload at `POST /api/project/import`, floor listing, section assignment to an existing floor or creation of a new floor, and persistent floor/section IDs with normalized section bounds and local label anchors. Upload bytes are written with restrictive permissions and removed on success or failure. The project import combines decoded regions in their common schematic coordinate frame, preserving their relative offsets, block states, and block entities. Identical occupied cells are deduplicated; conflicting block states reject the whole transaction with region and cell details. Air is omitted by the decoder and cannot erase neighboring geometry. Chunk reads persist independently of the uploaded source.
+
+Verification: `npm.cmd test` (17/17) and `npm.cmd run typecheck`. Coverage includes the real fixture through authenticated HTTP import, authentication boundary, temp upload cleanup, reopen from SQLite, negative chunk coordinates, multi-region offsets/entities, and conflicting placement rollback.
+
+Remaining: imported project geometry is not yet wired to floor-specific public manifests/images or the Save/autosave render workflow; the current viewer and startup render still expose the seeded floor. That work depends on the project generation/save path and should be completed with tickets 04 and the floor-viewer integration. Browser interaction and Docker runtime checks were not run.
 
 Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
 

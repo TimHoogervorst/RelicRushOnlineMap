@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { decodeLitematic } from './litematic.js';
+import { openProject, importSchematicSection } from './project-store.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -108,6 +110,29 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     const source = path.join(dataDir, 'assets', 'minecraft', 'asset-source.json');
     try { res.json({ assetsConfigured: true, assets: JSON.parse(await readFile(source, 'utf8')) }); }
     catch { res.json({ assetsConfigured: false, assets: null }); }
+  });
+  app.get('/api/project/floors', requireEditor, async (_req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try { res.json({ floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
+    finally { db.close(); }
+  });
+  app.post('/api/project/import', requireEditor, requireSameOrigin, express.raw({ type: 'application/octet-stream', limit: '128mb' }), async (req, res) => {
+    const temporary = path.join(dataDir, `schematic-upload-${randomBytes(12).toString('hex')}.litematic`);
+    let db;
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Choose a Litematic file first.' });
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(temporary, req.body, { flag: 'wx', mode: 0o600 });
+      const schematic = decodeLitematic(req.body);
+      db = openProject(path.join(dataDir, 'project.sqlite'));
+      const result = importSchematicSection(db, schematic, {
+        floorId: req.get('x-floor-id') || null,
+        floorName: req.get('x-floor-name') || 'Floor 0',
+        sectionName: req.get('x-section-name') || path.basename(req.get('x-source-name') || 'Imported section', '.litematic')
+      });
+      res.status(201).json(result);
+    } catch (error) { res.status(400).json({ error: error.message || 'Could not import this Litematic.' }); }
+    finally { db?.close(); await rm(temporary, { force: true }).catch(() => {}); }
   });
   app.post('/api/assets/upload', requireEditor, requireSameOrigin, reserveAssetSetup, express.raw({ type: 'application/octet-stream', limit: '128mb' }), async (req, res) => {
     const temporary = path.join(dataDir, `asset-upload-${randomBytes(12).toString('hex')}.jar`);
