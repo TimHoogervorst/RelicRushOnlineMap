@@ -13,7 +13,7 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 | [03 — Import a schematic into a saved floor and section](03-import-sections-and-floors.md) | The owner can add dungeon areas without retaining their source schematic. | Blocked | 02 |
 | [04 — Keep saves consistent during rendering and failures](04-reliable-save-and-refresh.md) | The owner can keep editing while saves run, and visitors always receive a complete saved map. | Blocked | 03 |
 | [05 — Place markers and browse a grouped legend](05-markers-and-grouped-legend.md) | The owner can maintain points of interest; visitors can find and filter them. | In progress | 04 |
-| [06 — Edit individual blocks with a block palette](06-single-block-editing.md) | The owner can make small geometry corrections directly in the map. | Blocked | 04 |
+| [06 — Edit individual blocks with a block palette](06-single-block-editing.md) | The owner can make small geometry corrections directly in the map. | In progress | 04 |
 | [07 — Move block selections and inspect lower heights](07-selection-height-and-slices.md) | The owner can adjust several blocks together and reach geometry hidden beneath upper blocks. | Blocked | 06 |
 | [08 — Arrange entire sections with their markers and labels](08-whole-section-layout.md) | The owner can spread dungeon areas apart while preserving their points of interest. | Blocked | 05 |
 | [09 — Draw dotted connections between section entrances](09-dotted-section-connections.md) | Visitors can understand that sections separated in the displayed layout connect in the dungeon. | Blocked | 08 |
