@@ -162,7 +162,45 @@ function populateSectionLayout() {
   document.querySelector('#section-z').value = section.placementZ;
   document.querySelector('#section-label-x').value = section.labelX;
   document.querySelector('#section-label-z').value = section.labelZ;
+  const settings = section.renderSettings ?? { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018 };
+  document.querySelector('#render-cutaway').value = settings.cutaways.map(box => [box.x,box.y,box.z,box.width,box.height,box.depth].join(',')).join('\n');
+  document.querySelector('#render-excluded').value = settings.excludedBlocks.join(', ');
+  document.querySelector('#render-pixel-size').value = settings.pixelSize;
+  document.querySelector('#render-height-shade').value = settings.heightShadePerBlock;
 }
+function readRenderSettings() {
+  const lines = document.querySelector('#render-cutaway').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const cutaways = lines.map(line => {
+    const values = line.split(',').map(value => Number(value.trim()));
+    if (values.length !== 6 || values.some(value => !Number.isSafeInteger(value))) throw new Error('Each cutaway line needs six whole numbers: x,y,z,width,height,depth.');
+    const [x,y,z,width,height,depth] = values; return { x,y,z,width,height,depth };
+  });
+  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) };
+}
+async function saveRenderSettings() {
+  const section = selectedLayoutSection(), status = document.querySelector('#render-settings-status'); if (!section) return;
+  try {
+    const settings = readRenderSettings(); status.textContent = 'Saving settings and regenerating map…';
+    const response = await fetch(`/api/project/sections/${encodeURIComponent(section.id)}/render-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, settings }) });
+    const result = await response.json();
+    if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+    projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+    if (!result.saved) { status.textContent = `Settings retained; ${result.warning}. Use Save to retry.`; return; }
+    status.textContent = 'Render settings saved. The visitor map was regenerated.'; await loadFloor(floorManifest.id); await refreshSaveStatus();
+  } catch (error) { status.textContent = error.message; }
+}
+document.querySelector('#render-settings-save').addEventListener('click', () => void saveRenderSettings());
+async function renderSettingsHistory(direction) {
+  const status = document.querySelector('#render-settings-status');
+  const response = await fetch(`/api/project/render-settings/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  if (!result.saved) { status.textContent = `Settings ${direction} retained; ${result.warning}. Use Save to retry.`; return; }
+  status.textContent = `Render settings ${direction} complete.`; await loadFloor(floorManifest.id); await refreshSaveStatus();
+}
+document.querySelector('#render-settings-undo').addEventListener('click', () => void renderSettingsHistory('undo'));
+document.querySelector('#render-settings-redo').addEventListener('click', () => void renderSettingsHistory('redo'));
 function renderLayoutConflicts() {
   const svg = document.querySelector('#section-selection'); if (!svg || !floorManifest) return;
   const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1, origin = floorManifest.coordinateOrigin ?? { x: 0, z: 0 };
@@ -756,6 +794,16 @@ document.querySelector('#upload-assets').addEventListener('click', async () => {
   const response = await fetch('/api/assets/upload', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file });
   const result = await response.json();
   status.textContent = response.ok ? `Minecraft ${result.assets.minecraftVersion} assets saved (${result.assets.blockTextures} textures).` : result.error;
+});
+document.querySelector('#upload-resource-pack').addEventListener('click', async () => {
+  const file = document.querySelector('#resource-pack-zip').files[0], status = document.querySelector('#setup-status');
+  if (!file) { status.textContent = 'Choose a resource pack ZIP first.'; return; }
+  status.textContent = 'Uploading and validating resource pack…';
+  const response = await fetch('/api/assets/resource-pack', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file });
+  const result = await response.json();
+  status.textContent = response.ok ? `Resource pack ${result.resourcePack.description || '(unnamed)'} (format ${result.resourcePack.packFormat}) saved (${result.resourcePack.sha256.slice(0, 12)}…). ${result.saved ? 'Map regenerated.' : result.warning}` : result.error;
+  if (result.status) setSaveStatus(result.status);
+  if (response.ok && result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
 });
 document.querySelector('#import-floor').addEventListener('change', event => { document.querySelector('#import-floor-name').disabled = Boolean(event.target.value); });
 document.querySelector('#import-schematic').addEventListener('click', async () => {

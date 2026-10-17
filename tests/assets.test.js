@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { extractMatchingAssets } from '../src/assets.js';
+import { extractMatchingAssets, extractResourcePack } from '../src/assets.js';
 
 function zip(entries) {
   const locals = [], centrals = [];
@@ -60,4 +60,20 @@ test('asset extraction rejects duplicate and traversal paths', async t => {
   await assert.rejects(extractMatchingAssets(jar, path.join(dir, 'out')), /Duplicate resource path/);
   await writeFile(jar, zip([...source('26.3'), ['assets/minecraft/textures/block/../../bad.png', 'x']]));
   await assert.rejects(extractMatchingAssets(jar, path.join(dir, 'out')), /Unsafe resource path/);
+});
+
+
+test('resource packs validate paths and metadata, layerable extraction is atomic and tracks hash and format', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-pack-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const zipPath = path.join(dir, 'pack.zip'), output = path.join(dir, 'resource-pack');
+  const pack = entries => [['pack.mcmeta', JSON.stringify({ pack: { pack_format: 34, description: 'Test pack' } })], ...entries];
+  await writeFile(zipPath, zip(pack([['assets/minecraft/textures/block/stone.png', 'override']])));
+  const metadata = await extractResourcePack(zipPath, output);
+  assert.equal(metadata.packFormat, 34); assert.equal(metadata.description, 'Test pack'); assert.match(metadata.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(await readFile(path.join(output, 'textures/block/stone.png'), 'utf8'), 'override');
+  await writeFile(zipPath, zip(pack([['assets/minecraft/models/block/../../escape.json', 'bad']])));
+  await assert.rejects(extractResourcePack(zipPath, output), /Unsafe resource path/);
+  assert.equal(await readFile(path.join(output, 'textures/block/stone.png'), 'utf8'), 'override');
+  await writeFile(zipPath, zip([['assets/minecraft/textures/block/stone.png', 'missing metadata']]));
+  await assert.rejects(extractResourcePack(zipPath, output), /pack.mcmeta/);
 });

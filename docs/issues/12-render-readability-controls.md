@@ -1,6 +1,6 @@
 # 12 — Refine map readability with cutaways and resource packs
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -25,5 +25,13 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implementation in progress on `ticket/12-render-readability-controls`:
+
+- Persisted section-local cutaway boxes and excluded namespaced block IDs in SQLite. Render jobs filter a copied floor snapshot by each block's section-local coordinates, retaining stored geometry and block entities.
+- Added editor controls to add/edit/remove cutaway rows, edit exclusions, and tune global pixel scale (4 to 32) and height shading (0 to 0.05). Settings edits save and regenerate floor output with session undo/redo.
+- Added optional authenticated resource-pack ZIP upload. Entries are bounded (128 MiB compressed, 16 MiB each, 256 MiB expanded, 100,000 entries), reject duplicate/traversal paths, require `pack.mcmeta`, and are staged/atomically swapped. The renderer checks the pack before vanilla blockstates/models/textures; metadata includes pack format, description, source name, SHA-256 and entry count and appears in the visitor manifest.
+- Rendering rejects images over 8,000,000 pixels before allocating raster buffers (about 64 MiB for the two main buffers). Pixel scale and shading are validated. Tinted model faces use deterministic default biome colors; animation uses the source PNG's first frame. Actual biome sampling remains unavailable.
+- Focused tests cover settings validation and reopen, immutable geometry snapshots, auth, undo/redo, resource-pack layering/hash/restart/path safety, render dimension limits, and pack replacement preservation. `npm test` and `npm run typecheck` pass on this branch.
+
+The real supplied fixture was rendered locally at 16 pixels per block, then compared against a section cutaway and a resource-pack texture override (a temporary recolored copy of the Minecraft block textures). Both variations rendered with the expected visual change. Docker acceptance remains open because Docker Engine is unavailable in this environment; browser interaction has not been smoke-tested. No storage/coordinate contract change; `section_render_settings` and project `render_options` are additive SQLite state.
 

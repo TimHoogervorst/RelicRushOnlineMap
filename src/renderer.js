@@ -1,10 +1,18 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
+
+const MAX_RENDER_PIXELS = 8_000_000;
 
 function resourcePath(id) {
   const split = id.indexOf(':');
   return split < 0 || id.slice(0, split) === 'minecraft' ? id.slice(split + 1) : path.join(id.slice(0, split), id.slice(split + 1));
+}
+
+function defaultBiomeTint(blockId) {
+  if (blockId.includes('water')) return [63, 118, 228];
+  if (/leaves|azalea|moss/.test(blockId)) return [119, 171, 62];
+  return [127, 178, 56];
 }
 
 function matchingModels(blockstate, properties) {
@@ -29,11 +37,14 @@ function matchingModels(blockstate, properties) {
   return output;
 }
 
-export async function renderOrthographic(schematic, { assets, output, pixelSize = 16, maxPixels = 20_000_000 } = {}) {
+export async function renderOrthographic(schematic, { assets, output, pixelSize = 16, heightShadePerBlock = 0.018, maxPixels = MAX_RENDER_PIXELS, assetOverrides = [] } = {}) {
   if (!assets) throw new Error('Minecraft assets are not configured. Set MINECRAFT_ASSETS to the extracted assets/minecraft directory from the matching Minecraft 26.3 client JAR.');
+  if (!Number.isInteger(pixelSize) || pixelSize < 4 || pixelSize > 32) throw new Error('Pixel scale must be an integer from 4 to 32 pixels per block.');
+  if (typeof heightShadePerBlock !== 'number' || !Number.isFinite(heightShadePerBlock) || heightShadePerBlock < 0 || heightShadePerBlock > 0.05) throw new Error('Height shading must be between 0 and 0.05 per block.');
   const { x: width, z: depth, y: height } = schematic.dimensions;
   const outWidth = width * pixelSize, outHeight = depth * pixelSize;
-  if (outWidth * outHeight > maxPixels) throw new Error(`Map image ${outWidth}×${outHeight} exceeds the ${maxPixels.toLocaleString()} pixel safety limit.`);
+  const pixelLimit = Math.min(maxPixels, MAX_RENDER_PIXELS);
+  if (outWidth * outHeight > pixelLimit) throw new Error(`Map image ${outWidth}×${outHeight} exceeds the ${pixelLimit.toLocaleString('en-US')} pixel safety limit (about 64 MiB for raster buffers).`);
   const raw = Buffer.alloc(outWidth * outHeight * 4, 0);
   const zBuffer = new Float32Array(outWidth * outHeight).fill(-Infinity);
   const modelCache = new Map(), textureCache = new Map(), stateModelCache = new Map();
@@ -41,7 +52,8 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
   const specialFallbacks = new Set();
 
   const readJson = async file => {
-    try { return JSON.parse(await readFile(file, 'utf8')); } catch { return null; }
+    for (const root of [...assetOverrides, assets]) { try { return JSON.parse(await readFile(path.join(root, path.relative(assets, file)), 'utf8')); } catch {} }
+    return null;
   };
   const modelData = async (modelId, level = 0) => {
     if (modelCache.has(modelId)) return modelCache.get(modelId);
@@ -54,7 +66,9 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     return resolved;
   };
   const textureData = async textureId => {
-    const file = path.join(assets, 'textures', `${resourcePath(textureId)}.png`);
+    const relative = path.join('textures', `${resourcePath(textureId)}.png`);
+    let file = path.join(assets, relative);
+    for (const root of assetOverrides) { const candidate = path.join(root, relative); try { await access(candidate); file = candidate; break; } catch {} }
     if (!textureCache.has(file)) {
       try {
         const { data, info } = await sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -91,7 +105,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
         const pixels = await textureData(texture);
         if (!pixels) continue;
         const uv = face.uv ?? [element.from[0], element.from[2], element.to[0], element.to[2]];
-        models.push({ element, pixels, uv, rotateY: ((variant.y ?? 0) % 360 + 360) % 360, uvRotation: face.rotation ?? 0, tint: null });
+        models.push({ element, pixels, uv, rotateY: ((variant.y ?? 0) % 360 + 360) % 360, uvRotation: face.rotation ?? 0, tint: face.tintindex === undefined ? null : defaultBiomeTint(block.id) });
       }
     }
     stateModelCache.set(cacheKey, models);
@@ -144,7 +158,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
       const endX = Math.min(outWidth, Math.ceil((block.x + maxX) * pixelSize));
       const startY = Math.max(0, Math.floor((depth - block.z - maxZ) * pixelSize));
       const endY = Math.min(outHeight, Math.ceil((depth - block.z - minZ) * pixelSize));
-      const shade = Math.max(.65, 1 - (highY - y) * .018);
+      const shade = Math.max(.65, 1 - (highY - y) * heightShadePerBlock);
       for (let py = startY; py < endY; py++) for (let px = startX; px < endX; px++) {
         const worldX = px / pixelSize - block.x;
         const worldZ = depth - (py + .5) / pixelSize - block.z;
@@ -176,7 +190,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),
-    renderer: { name: 'relic-ortho-model-rasterizer', version: 1, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock: 0.018 }
+    renderer: { name: 'relic-ortho-model-rasterizer', version: 1, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
   };
 }
 

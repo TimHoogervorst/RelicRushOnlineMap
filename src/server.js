@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, saveSectionRenderSettings, restoreSectionRenderSettings } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
+import { extractResourcePack } from './assets.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -32,6 +33,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const blockHistory = new Map();
   const sectionHistory = new Map();
   const connectionHistory = new Map();
+  const renderSettingsHistory = new Map();
   const rememberMarker = (token, command) => {
     const history = markerHistory.get(token) ?? { undo: [], redo: [] };
     history.undo.push(command);
@@ -83,7 +85,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -124,8 +126,11 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.get('/api/status', (_req, res) => res.json({ initialized: workerState.ready, mapAvailable: Boolean(workerState.rendered), warning: workerState.warning ?? null }));
   app.get('/api/editor/project', requireEditor, async (_req, res) => {
     const source = path.join(dataDir, 'assets', 'minecraft', 'asset-source.json');
-    try { res.json({ assetsConfigured: true, assets: JSON.parse(await readFile(source, 'utf8')) }); }
-    catch { res.json({ assetsConfigured: false, assets: null }); }
+    const packSource = path.join(dataDir, 'assets', 'resource-pack', 'resource-pack-source.json');
+    let assets = null, resourcePack = null;
+    try { assets = JSON.parse(await readFile(source, 'utf8')); } catch {}
+    try { resourcePack = JSON.parse(await readFile(packSource, 'utf8')); } catch {}
+    res.json({ assetsConfigured: Boolean(assets), assets, resourcePack });
   });
   app.get('/api/project/floors', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
@@ -157,6 +162,31 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       if (!section) return res.status(404).json({ error: 'Section does not exist.' });
       res.json({ revision: projectRevision(db), section: { ...section, bounds: JSON.parse(section.bounds_json) }, blocks: readSectionBlocks(db, section.id) });
     } finally { db.close(); }
+  });
+
+  app.put('/api/project/sections/:id/render-settings', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const result = saveSectionRenderSettings(db, req.params.id, req.body?.settings, req.body?.expectedRevision);
+      const token = getSession(req).token, history = renderSettingsHistory.get(token) ?? { undo: [], redo: [] };
+      history.undo.push(result); if (history.undo.length > 50) history.undo.shift(); history.redo = []; renderSettingsHistory.set(token, history);
+      try { await generation.save(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) { res.status(/another editor tab|does not exist/i.test(error.message) ? 409 : 400).json({ error: error.message }); }
+    finally { db.close(); }
+  });
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/render-settings/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const token = getSession(req).token, history = renderSettingsHistory.get(token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'], command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no render settings edit to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const result = restoreSectionRenderSettings(db, command, direction, req.body?.expectedRevision);
+      source.pop(); target.push(command); renderSettingsHistory.set(token, history);
+      try { await generation.save(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) { res.status(/another editor tab|does not exist|history/i.test(error.message) ? 409 : 400).json({ error: error.message }); }
+    finally { db.close(); }
   });
 
   app.put('/api/project/sections/:id/layout', requireEditor, requireSameOrigin, async (req, res) => {
@@ -522,6 +552,19 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       res.json({ configured: true, assets: metadata });
     } catch (error) { res.status(400).json({ error: error.message || 'Could not configure Minecraft assets.' }); }
     finally { await rm(temporary, { force: true }).catch(() => {}); res.locals.releaseAssetSetup?.(); }
+  });
+  app.post('/api/assets/resource-pack', requireEditor, requireSameOrigin, reserveAssetSetup, express.raw({ type: 'application/octet-stream', limit: '128mb' }), async (req, res) => {
+    const temporary = path.join(dataDir, `resource-pack-upload-${randomBytes(12).toString('hex')}.zip`);
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Choose a resource pack ZIP first.' });
+      await writeFile(temporary, req.body, { flag: 'wx', mode: 0o600 });
+      const metadata = await extractResourcePack(temporary, path.join(dataDir, 'assets', 'resource-pack'));
+      advanceProjectRevision(db);
+      try { await generation.save(snapshotProject(db)); return res.json({ configured: true, resourcePack: metadata, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ configured: true, resourcePack: metadata, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) { res.status(400).json({ error: error.message || 'Could not configure resource pack.' }); }
+    finally { db.close(); await rm(temporary, { force: true }).catch(() => {}); res.locals.releaseAssetSetup?.(); }
   });
   app.all('/api/editor/*path', requireEditor, (_req, res) => res.status(404).json({ error: 'Editor operation is not available yet.' }));
   app.all('/api/assets/*path', requireEditor, (_req, res) => res.status(404).json({ error: 'Asset operation is not available yet.' }));
