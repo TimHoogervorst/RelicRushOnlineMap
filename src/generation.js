@@ -47,7 +47,15 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           const floor = snapshot.floors[index];
           progress(`Rendering ${floor.name}`, Math.floor(index / Math.max(1, snapshot.floors.length) * 85));
           const output = `${floor.id}.png`;
-          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks: floor.blocks }, assets: assetsDir, output: path.join(temporary, output) });
+          const sections = new Map((floor.sections ?? []).map(section => [section.id, section]));
+          const blocks = floor.blocks.filter(block => {
+            const settings = sections.get(block.sectionId)?.renderSettings ?? {};
+            if ((settings.excludedBlocks ?? []).includes(block.id)) return false;
+            const x = block.localX ?? block.x, y = block.localY ?? block.y, z = block.localZ ?? block.z;
+            return !(settings.cutaways ?? []).some(box => x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height && z >= box.z && z < box.z + box.depth);
+          }).map(({ sectionId, localX, localY, localZ, ...block }) => block);
+          const settings = floor.renderOptions ?? floor.sections?.[0]?.renderSettings ?? {};
+          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] });
           const outputPath = path.join(temporary, output);
           const [info, signature] = await Promise.all([stat(outputPath), readFile(outputPath).then(bytes => bytes.subarray(0, 8))]);
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
@@ -56,7 +64,9 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           floors.push({ id: floor.id, name: floor.name, image: output, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [], ...rendered });
         }
         progress('Writing revision snapshot', 90);
-        const manifest = { manifestVersion: 1, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
+        let resourcePack = null;
+        try { resourcePack = JSON.parse(await readFile(path.join(path.dirname(assetsDir), 'resource-pack', 'resource-pack-source.json'), 'utf8')); } catch {}
+        const manifest = { manifestVersion: 1, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), resourcePack, floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');

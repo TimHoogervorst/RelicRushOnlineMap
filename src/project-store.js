@@ -53,6 +53,7 @@ export function openProject(path) {
     CREATE TABLE IF NOT EXISTS project_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS floors (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, floor_id TEXT NOT NULL REFERENCES floors(id), name TEXT NOT NULL, bounds_json TEXT NOT NULL, placement_x INTEGER NOT NULL DEFAULT 0, placement_z INTEGER NOT NULL DEFAULT 0, label_x REAL NOT NULL DEFAULT 0, label_z REAL NOT NULL DEFAULT 0, provenance_json TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS section_render_settings (section_id TEXT PRIMARY KEY REFERENCES sections(id) ON DELETE CASCADE, settings_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_chunks (section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE, chunk_x INTEGER NOT NULL, chunk_y INTEGER NOT NULL, chunk_z INTEGER NOT NULL, format_version INTEGER NOT NULL, blob BLOB NOT NULL, PRIMARY KEY(section_id, chunk_x, chunk_y, chunk_z));
     CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id));
     CREATE TABLE IF NOT EXISTS custom_marker_types (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL);
@@ -372,11 +373,15 @@ export function restoreSectionConnection(db, id, connection, expectedRevision) {
 
 export function snapshotProject(db) {
   const revision = projectRevision(db);
+  const renderOptionsRow = db.prepare("SELECT value FROM project_meta WHERE key='render_options'").get();
+  const renderOptions = renderOptionsRow ? JSON.parse(renderOptionsRow.value) : { pixelSize: 16, heightShadePerBlock: 0.018 };
   const markerTypes = listMarkerTypes(db);
   const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
   return { revision, floors: floors.map(floor => {
-    const sections = db.prepare('SELECT id,name,bounds_json,placement_x,placement_z,label_x,label_z FROM sections WHERE floor_id=? ORDER BY id').all(floor.id).map(row => ({
-      id: row.id, name: row.name, bounds: JSON.parse(row.bounds_json), placementX: row.placement_x, placementZ: row.placement_z, labelX: row.label_x, labelZ: row.label_z
+    const sections = db.prepare(`SELECT s.id,s.name,s.bounds_json,s.placement_x,s.placement_z,s.label_x,s.label_z,r.settings_json
+      FROM sections s LEFT JOIN section_render_settings r ON r.section_id=s.id WHERE s.floor_id=? ORDER BY s.id`).all(floor.id).map(row => ({
+      id: row.id, name: row.name, bounds: JSON.parse(row.bounds_json), placementX: row.placement_x, placementZ: row.placement_z, labelX: row.label_x, labelZ: row.label_z,
+      renderSettings: { ...(row.settings_json ? JSON.parse(row.settings_json) : defaultSectionRenderSettings()), ...renderOptions }
     }));
     const sectionBlocks = new Map(sections.map(section => [section.id, readSectionBlocks(db, section.id)]));
     for (const section of sections) {
@@ -392,7 +397,7 @@ export function snapshotProject(db) {
     const maxX = Math.max(0, ...sections.flatMap(section => [section.placementX + section.bounds.x, ...sectionBlocks.get(section.id).map(block => section.placementX + block.x + 1)]));
     const maxZ = Math.max(0, ...sections.flatMap(section => [section.placementZ + section.bounds.z, ...sectionBlocks.get(section.id).map(block => section.placementZ + block.z + 1)]));
     const maxY = Math.max(1, ...sections.map(section => section.bounds.y));
-    const blocks = sections.flatMap(section => sectionBlocks.get(section.id).map(block => ({ ...block, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
+    const blocks = sections.flatMap(section => sectionBlocks.get(section.id).map(block => ({ ...block, sectionId: section.id, localX: block.x, localY: block.y, localZ: block.z, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
     for (const section of sections) { section.placementX -= minX; section.placementZ -= minZ; }
     const markers = db.prepare(`SELECT m.id,m.section_id AS sectionId,m.type,m.name,m.description,m.x,m.z,m.stair_destination_id AS stairDestinationId,s.placement_x AS sectionX,s.placement_z AS sectionZ FROM markers m JOIN sections s ON s.id=m.section_id WHERE s.floor_id=? ORDER BY m.id`).all(floor.id).map(marker => ({
       id: marker.id, sectionId: marker.sectionId, type: marker.type, name: marker.name, description: marker.description,
@@ -405,8 +410,58 @@ export function snapshotProject(db) {
       displayA: { x: connection.ax + connection.xA - minX, z: connection.az + connection.zA - minZ },
       displayB: { x: connection.bx + connection.xB - minX, z: connection.bz + connection.zB - minZ }
     }));
-    return { ...floor, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections, markerTypes };
+    return { ...floor, renderOptions, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections, markerTypes };
   }) };
+}
+
+export function defaultSectionRenderSettings() {
+  return { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018 };
+}
+
+function validateSectionRenderSettings(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Render settings are required.');
+  const cutaways = input.cutaways ?? [], excludedBlocks = input.excludedBlocks ?? [];
+  const pixelSize = input.pixelSize ?? 16, heightShadePerBlock = input.heightShadePerBlock ?? 0.018;
+  if (!Number.isInteger(pixelSize) || pixelSize < 4 || pixelSize > 32) throw new Error('Pixel scale must be from 4 to 32 pixels per block.');
+  if (typeof heightShadePerBlock !== 'number' || !Number.isFinite(heightShadePerBlock) || heightShadePerBlock < 0 || heightShadePerBlock > 0.05) throw new Error('Height shading must be from 0 to 0.05 per block.');
+  if (!Array.isArray(cutaways) || cutaways.length > 100) throw new Error('A section can have at most 100 cutaway boxes.');
+  for (const box of cutaways) {
+    if (!box || !['x','y','z','width','height','depth'].every(key => Number.isSafeInteger(box[key]))) throw new Error('Cutaway boxes must use integer section coordinates and dimensions.');
+    if (box.x < -1000000 || box.y < -1000000 || box.z < -1000000 || box.width < 1 || box.height < 1 || box.depth < 1 || box.width > 1000000 || box.height > 1000000 || box.depth > 1000000) throw new Error('Cutaway boxes must have positive bounded dimensions.');
+  }
+  if (!Array.isArray(excludedBlocks) || excludedBlocks.length > 1000 || excludedBlocks.some(name => typeof name !== 'string' || !/^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(name))) throw new Error('Excluded blocks must be namespaced Minecraft block IDs.');
+  return { cutaways: cutaways.map(({ x,y,z,width,height,depth }) => ({ x,y,z,width,height,depth })), excludedBlocks: [...new Set(excludedBlocks)].sort(), pixelSize, heightShadePerBlock };
+}
+
+export function saveSectionRenderSettings(db, sectionId, input, expectedRevision) {
+  const settings = validateSectionRenderSettings(input);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const current = db.prepare('SELECT settings_json FROM section_render_settings WHERE section_id=?').get(sectionId);
+  if (!db.prepare('SELECT 1 FROM sections WHERE id=?').get(sectionId)) throw new Error('Section does not exist.');
+  const before = current ? JSON.parse(current.settings_json) : defaultSectionRenderSettings();
+  const tx = db.transaction(() => {
+    db.prepare(`INSERT INTO section_render_settings(section_id,settings_json) VALUES(?,?) ON CONFLICT(section_id) DO UPDATE SET settings_json=excluded.settings_json`).run(sectionId, JSON.stringify({ cutaways: settings.cutaways, excludedBlocks: settings.excludedBlocks }));
+    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: settings.pixelSize, heightShadePerBlock: settings.heightShadePerBlock }));
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { sectionId, before, after: settings, revision: expectedRevision + 1 };
+}
+
+export function restoreSectionRenderSettings(db, command, direction, expectedRevision) {
+  if (!['undo','redo'].includes(direction)) throw new Error('Invalid render settings history direction.');
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const target = direction === 'undo' ? command.before : command.after;
+  if (!db.prepare('SELECT 1 FROM sections WHERE id=?').get(command.sectionId)) throw new Error('Section does not exist.');
+  const current = db.prepare('SELECT settings_json FROM section_render_settings WHERE section_id=?').get(command.sectionId);
+  const tx = db.transaction(() => {
+    const validated = validateSectionRenderSettings(target);
+    db.prepare(`INSERT INTO section_render_settings(section_id,settings_json) VALUES(?,?) ON CONFLICT(section_id) DO UPDATE SET settings_json=excluded.settings_json`).run(command.sectionId, JSON.stringify({ cutaways: validated.cutaways, excludedBlocks: validated.excludedBlocks }));
+    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: validated.pixelSize, heightShadePerBlock: validated.heightShadePerBlock }));
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { sectionId: command.sectionId, before: current ? JSON.parse(current.settings_json) : defaultSectionRenderSettings(), after: target, revision: expectedRevision + 1 };
 }
 
 export function seedInitialProject(db, fixturePath) {
