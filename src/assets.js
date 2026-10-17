@@ -1,7 +1,7 @@
 import { inflateRawSync } from 'node:zlib';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 function zipEntries(jar, maxEntries = 100000, maxEntryBytes = 16 * 1024 * 1024) {
   const eocd = jar.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
@@ -33,9 +33,9 @@ function zipEntries(jar, maxEntries = 100000, maxEntryBytes = 16 * 1024 * 1024) 
 }
 
 export async function extractMatchingAssets(jarPath, outputDir, expectedVersion = '26.3', limits = {}) {
-  const { maxArchiveBytes = 512 * 1024 * 1024, maxEntryBytes = 16 * 1024 * 1024, maxExpandedBytes = 512 * 1024 * 1024, maxEntries = 100000 } = limits;
+  const { maxArchiveBytes = 128 * 1024 * 1024, maxEntryBytes = 16 * 1024 * 1024, maxExpandedBytes = 512 * 1024 * 1024, maxEntries = 100000 } = limits;
   const archive = await readFile(jarPath);
-  if (archive.length > maxArchiveBytes) throw new Error(`Minecraft asset archive exceeds ${(maxArchiveBytes / 1024 / 1024).toLocaleString()} MiB limit`);
+  if (archive.length > maxArchiveBytes) throw new Error(`Minecraft asset archive exceeds ${(maxArchiveBytes / 1024 / 1024).toLocaleString()} MiB compressed limit`);
   const entries = zipEntries(archive, maxEntries, maxEntryBytes);
   const versionEntry = entries.find(entry => entry.name === 'version.json');
   if (!versionEntry) throw new Error('Minecraft client archive is missing version.json');
@@ -45,8 +45,8 @@ export async function extractMatchingAssets(jarPath, outputDir, expectedVersion 
   if (versionJson.id !== expectedVersion || versionJson.world_version !== 5023) throw new Error(`Expected Minecraft ${expectedVersion} / world version 5023 assets; received ${versionJson.id} / ${versionJson.world_version}`);
   const required = ['blockstates/stone.json', 'models/block/stone.json', 'textures/block/stone.png'];
   for (const item of required) if (!entries.some(entry => entry.name === item)) throw new Error(`Minecraft asset archive is missing ${item}`);
-  const stage = `${outputDir}.staging-${process.pid}`;
-  await rm(stage, { recursive: true, force: true });
+  const unique = randomUUID();
+  const stage = `${outputDir}.staging-${unique}`;
   await mkdir(stage, { recursive: true });
   try {
     let expandedBytes = 0;
@@ -63,8 +63,7 @@ export async function extractMatchingAssets(jarPath, outputDir, expectedVersion 
     const metadata = { minecraftVersion: versionJson.id, worldVersion: versionJson.world_version, sourceName: path.basename(jarPath), sha256: createHash('sha256').update(archive).digest('hex'), blockStates: entries.filter(e => e.name.startsWith('blockstates/')).length, blockModels: entries.filter(e => e.name.startsWith('models/block/')).length, blockTextures: entries.filter(e => e.name.startsWith('textures/block/')).length };
     await writeFile(path.join(stage, 'asset-source.json'), JSON.stringify(metadata, null, 2), { mode: 0o600 });
     await chmod(stage, 0o700);
-    const previous = `${outputDir}.previous-${process.pid}`;
-    await rm(previous, { recursive: true, force: true });
+    const previous = `${outputDir}.previous-${unique}`;
     try {
       try { await rename(outputDir, previous); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       await rename(stage, outputDir);

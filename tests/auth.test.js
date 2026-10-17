@@ -99,8 +99,30 @@ test('owner can upload version-checked assets and failed setup preserves configu
   const upload = await fetch(`${origin}/api/assets/upload`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream' }, body: valid });
   assert.equal(upload.status, 200);
   assert.equal((await upload.json()).assets.minecraftVersion, '26.3');
-  const invalid = await fetch(`${origin}/api/assets/upload`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream' }, body: zip([['version.json', JSON.stringify({ id: 'wrong', world_version: 0 })]]) });
+  let invalid;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    invalid = await fetch(`${origin}/api/assets/upload`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream' }, body: zip([['version.json', JSON.stringify({ id: 'wrong', world_version: 0 })]]) });
+    if (invalid.status !== 409) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.equal(invalid.status, 400);
   const project = await fetch(`${origin}/api/editor/project`, { headers: { cookie } }).then(response => response.json());
   assert.equal(project.assets.minecraftVersion, '26.3');
+});
+
+test('concurrent asset setup returns busy instead of overlapping extraction', async t => {
+  let signalStarted, finishExtraction;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const extraction = new Promise(resolve => { finishExtraction = resolve; });
+  const { origin } = await fixture(t, { assetExtractor: async () => { signalStarted(); await extraction; return { minecraftVersion: '26.3' }; } });
+  const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const headers = { cookie, origin, 'content-type': 'application/octet-stream' };
+  const firstUpload = fetch(`${origin}/api/assets/upload`, { method: 'POST', headers, body: 'first archive' });
+  await started;
+  const busy = await fetch(`${origin}/api/assets/upload`, { method: 'POST', headers, body: 'second archive' });
+  assert.equal(busy.status, 409);
+  assert.match((await busy.json()).error, /already running/);
+  finishExtraction();
+  assert.equal((await firstUpload).status, 200);
 });

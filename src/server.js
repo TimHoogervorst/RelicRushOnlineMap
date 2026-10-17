@@ -20,7 +20,7 @@ function originAllowed(req) {
   catch { return false; }
 }
 
-export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true } = {}) {
+export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, assetExtractor } = {}) {
   const app = express();
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
@@ -33,14 +33,15 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   };
   const requireEditor = (req, res, next) => getSession(req) ? next() : res.status(401).json({ error: 'Editor login required.' });
   const requireSameOrigin = (req, res, next) => originAllowed(req) ? next() : res.status(403).json({ error: 'Cross-origin request rejected.' });
-  const extractAssets = (archivePath, outputDir) => new Promise((resolve, reject) => {
+  const extractAssets = assetExtractor ?? ((archivePath, outputDir) => new Promise((resolve, reject) => {
     const job = new Worker(new URL('./asset-worker.js', import.meta.url), { workerData: { archivePath, outputDir } });
     job.once('message', result => result.ok ? resolve(result.assets) : reject(new Error(result.error)));
     job.once('error', reject);
     job.once('exit', code => { if (code !== 0) reject(new Error(`Asset extraction worker exited (${code}).`)); });
-  });
+  }));
   let workerState = { ready: false, error: null };
   let activeWorker;
+  let assetSetupBusy = false;
   const startWorker = (forceRender = false) => {
     if (!initializeWorker) return;
     workerState = { ready: false, warning: null, rendered: Boolean(workerState.rendered) };
@@ -75,6 +76,15 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     if (/^(POST|PUT|PATCH|DELETE)$/.test(req.method)) return requireSameOrigin(req, res, next);
     next();
   });
+  const reserveAssetSetup = (_req, res, next) => {
+    if (assetSetupBusy) return res.status(409).json({ error: 'Asset setup is already running. Try again when it finishes.' });
+    assetSetupBusy = true;
+    let released = false;
+    const release = () => { if (!released) { released = true; assetSetupBusy = false; } };
+    res.locals.releaseAssetSetup = release;
+    res.once('finish', release);
+    next();
+  };
   for (const namespace of ['/api/editor', '/api/assets', '/api/project', '/api/backups', '/api/generation', '/api/setup']) app.use(namespace, protectNamespace);
 
   app.get('/health', (_req, res) => res.status(workerState.ready ? 200 : 503).json({ status: workerState.ready ? 'ok' : 'starting', worker: workerState }));
@@ -99,7 +109,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     try { res.json({ assetsConfigured: true, assets: JSON.parse(await readFile(source, 'utf8')) }); }
     catch { res.json({ assetsConfigured: false, assets: null }); }
   });
-  app.post('/api/assets/upload', requireEditor, requireSameOrigin, express.raw({ type: 'application/octet-stream', limit: '512mb' }), async (req, res) => {
+  app.post('/api/assets/upload', requireEditor, requireSameOrigin, reserveAssetSetup, express.raw({ type: 'application/octet-stream', limit: '128mb' }), async (req, res) => {
     const temporary = path.join(dataDir, `asset-upload-${randomBytes(12).toString('hex')}.jar`);
     try {
       if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Choose a Minecraft client JAR first.' });
@@ -109,12 +119,15 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       startWorker(true);
       res.json({ configured: true, assets: metadata });
     } catch (error) { res.status(400).json({ error: error.message || 'Could not configure Minecraft assets.' }); }
-    finally { await rm(temporary, { force: true }).catch(() => {}); }
+    finally { await rm(temporary, { force: true }).catch(() => {}); res.locals.releaseAssetSetup?.(); }
   });
   app.all('/api/editor/*path', requireEditor, (_req, res) => res.status(404).json({ error: 'Editor operation is not available yet.' }));
   app.all('/api/assets/*path', requireEditor, (_req, res) => res.status(404).json({ error: 'Asset operation is not available yet.' }));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API operation is not available.' }));
-  app.use((error, _req, res, _next) => res.status(error.status === 413 ? 413 : 400).json({ error: error.status === 413 ? 'Upload exceeds the 512 MiB limit.' : 'Invalid request.' }));
+  app.use((error, _req, res, _next) => {
+    res.locals.releaseAssetSetup?.();
+    res.status(error.status === 413 ? 413 : 400).json({ error: error.status === 413 ? 'Upload exceeds the 128 MiB compressed limit.' : 'Invalid request.' });
+  });
 
   if (initializeWorker) mkdir(dataDir, { recursive: true }).then(() => startWorker()).catch(error => { workerState = { ready: false, error: error.message }; });
   return app;

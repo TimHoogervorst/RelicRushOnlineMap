@@ -43,6 +43,15 @@ test('asset extraction rejects cumulative expansion over its configured bound an
   assert.equal(JSON.parse(await readFile(path.join(output, 'asset-source.json'), 'utf8')).sha256, metadata.sha256);
 });
 
+test('asset extraction enforces the compressed archive size limit', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-assets-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const jar = path.join(dir, 'client.jar');
+  const bytes = zip(source('26.3'));
+  await writeFile(jar, bytes);
+  await assert.rejects(extractMatchingAssets(jar, path.join(dir, 'out'), '26.3', { maxArchiveBytes: bytes.length - 1 }), /compressed limit/);
+});
+
 test('asset extraction rejects duplicate and traversal paths', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-assets-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
