@@ -48,7 +48,9 @@ test('first fixture import persists once to SQLite and reopens from chunks', asy
     assert.equal(second.seeded, false);
     const restored = readSectionBlocks(database);
     assert.equal(restored.length, 3484);
-    assert.equal(database.prepare('SELECT COUNT(*) count FROM section_chunks WHERE format_version=1').get().count, first.chunks);
+    const chunkRows = database.prepare('SELECT blob FROM section_chunks WHERE format_version=1').all();
+    assert.equal(chunkRows.length, first.chunks);
+    assert.equal(chunkRows.reduce((total, row) => total + decodeChunkBlob(row.blob).blockEntities.length, 0), 48);
   } finally {
     database.close();
     rmSync(dir, { recursive: true, force: true });
