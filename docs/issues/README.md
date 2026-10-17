@@ -1,6 +1,6 @@
 # Implementation tickets
 
-Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01–06 have integrated implementation work and remain in progress pending their listed acceptance checks. Tickets 07 and 08 have implementation work in progress; ticket 09 is in progress; tickets 10-15 remain blocked by dependencies.
+Status: breakdown approved by the owner on 2026-10-17. Tickets are maintained locally; no GitHub issues have been created. Tickets 01–06 have integrated implementation work and remain in progress pending their listed acceptance checks. Tickets 07, 08, 09, and 10 have implementation work in progress; tickets 11–15 remain blocked by dependencies.
 
 The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSARY.md) are authoritative. These tickets represent vertical slices: every feature includes storage, API, UI and focused verification as applicable. Each can be demonstrated after its blockers are complete. Ticket numbers are local identifiers.
 
@@ -17,7 +17,7 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 | [07 — Move block selections and inspect lower heights](07-selection-height-and-slices.md) | The owner can adjust several blocks together and reach geometry hidden beneath upper blocks. | In progress | 06 |
 | [08 — Arrange entire sections with their markers and labels](08-whole-section-layout.md) | The owner can spread dungeon areas apart while preserving their points of interest. | In progress | 05 |
 | [09 — Draw dotted connections between section entrances](09-dotted-section-connections.md) | Visitors can understand that sections separated in the displayed layout connect in the dungeon. | In progress | 08 |
-| [10 — Connect stair markers and navigate between floors](10-stair-floor-navigation.md) | Visitors can follow stairs to the corresponding location on another floor. | Blocked | 08 |
+| [10 — Connect stair markers and navigate between floors](10-stair-floor-navigation.md) | Visitors can follow stairs to the corresponding location on another floor. | In progress | 08 |
 | [11 — Create and maintain custom marker types](11-custom-marker-types.md) | The owner can organize new kinds of points of interest without changing code. | Blocked | 05 |
 | [12 — Refine map readability with cutaways and resource packs](12-render-readability-controls.md) | The owner can expose obscured paths and tune map appearance without changing source schematics. | Blocked | 06 |
 | [13 — Manage floors and sections without dangling references](13-floor-section-lifecycle.md) | The owner can reorganize or remove areas without silently losing markers or breaking connections. | Blocked | 09, 10, 11 |
