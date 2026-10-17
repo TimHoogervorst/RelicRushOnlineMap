@@ -5,8 +5,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
 import { decodeLitematic, unpackPaletteIndices } from '../src/litematic.js';
 import { decodeChunkBlob, encodeSectionChunks, openProject, readSectionBlocks, seedInitialProject } from '../src/project-store.js';
+import { renderOrthographic } from '../src/renderer.js';
 
 test('packed palette indices can cross long boundaries', () => {
   // 5-bit values: index 12 starts at bit 60 and spans two 64-bit words.
@@ -67,4 +69,21 @@ test('decodes the supplied Litematic v7 fixture and normalizes negative Y extent
   assert.equal(schematic.blocks.length, 3484);
   assert.deepEqual(schematic.chests.map(({ x, y, z }) => [x, y, z]).sort(), [[27, 10, 8], [61, 9, 34]]);
   assert.equal(schematic.regions[0].signedSize.y, -13);
+});
+
+test('unsupported blocks appear in the rendered map and its diagnostics', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rr-map-render-test-'));
+  try {
+    const result = await renderOrthographic({
+      dimensions: { x: 1, y: 1, z: 1 },
+      blocks: [{ x: 0, y: 0, z: 0, id: 'minecraft:unknown_fixture_block', properties: {} }]
+    }, { assets: dir, output: path.join(dir, 'map.png'), pixelSize: 16 });
+    const { data, info } = await sharp(path.join(dir, 'map.png')).raw().toBuffer({ resolveWithObject: true });
+    const center = (8 * info.width + 8) * info.channels;
+    assert.deepEqual([...data.subarray(center, center + 4)], [255, 0, 220, 255]);
+    assert.deepEqual(result.unsupportedBlocks, ['minecraft:unknown_fixture_block']);
+    assert.match(result.specialBlockFallbacks[0], /visible magenta cross fallback/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

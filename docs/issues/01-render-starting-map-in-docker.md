@@ -27,7 +27,7 @@ None - can start immediately.
 
 Implemented in integration commit `389e6f6`: bounded Litematic v7 decoder; one-time SQLite project seed; gzip-compressed, versioned 16³ chunks; matching Minecraft 26.3 asset extraction; orthographic top-face model rasterizer behind a TypeScript adapter; worker-thread generation; immutable release files; public manifest/image endpoints; basic pan/zoom/fit viewer; Dockerfile and Compose service.
 
-**Verified on the host:** `npm test` (4/4), `npm run typecheck`, fixture dimensions/count/chest coordinates, packed indices crossing long boundaries, negative chunk round-trip, one-time persistence, exact asset version/hash extraction, 1,072 × 784 PNG generation, and `/health`, manifest, and image endpoints. The PNG was visually inspected.
+**Verified on the host:** `npm test` (5/5), `npm run typecheck`, fixture dimensions/count/chest coordinates, packed indices crossing long boundaries, negative chunk round-trip, one-time persistence, exact asset version/hash extraction, 1,072 × 784 PNG generation, and `/health`, manifest, and image endpoints. The PNG was visually inspected. Unsupported blocks now render as a visible magenta cross and appear in the generation diagnostics.
 
 **Still open:** Docker daemon access is denied in this environment, so Docker build/start and browser smoke remain unverified. Visual acceptance still needs review of transparent regions, height cues, and special-block fallbacks. The selected renderer projects textured top-face model geometry; it does not render full side faces or biome tint. Deepslate 0.27.2 is pinned and evaluated but is not the selected backend. Ticket remains **in progress** until these gates are resolved.
 

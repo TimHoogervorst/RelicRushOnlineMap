@@ -104,6 +104,11 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
   const prepared = [];
   for (const block of ordered) {
     const faces = await blockModels(block);
+    if (!faces.length) {
+      lowY = Math.min(lowY, block.y);
+      highY = Math.max(highY, block.y + 1);
+      specialFallbacks.add(`${block.id} uses a visible magenta cross fallback because no top-face model could be rendered`);
+    }
     for (const { element } of faces) {
       lowY = Math.min(lowY, block.y + element.from[1] / 16);
       highY = Math.max(highY, block.y + element.to[1] / 16);
@@ -111,6 +116,22 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     prepared.push({ block, faces });
   }
   for (const { block, faces } of prepared) {
+    if (!faces.length) {
+      const startX = Math.max(0, block.x * pixelSize), endX = Math.min(outWidth, (block.x + 1) * pixelSize);
+      const startY = Math.max(0, (depth - block.z - 1) * pixelSize), endY = Math.min(outHeight, (depth - block.z) * pixelSize);
+      for (let py = startY; py < endY; py++) for (let px = startX; px < endX; px++) {
+        const at = py * outWidth + px;
+        if (block.y + 1 < zBuffer[at]) continue;
+        const lx = (px - startX) % pixelSize, ly = (py - startY) % pixelSize;
+        const edge = lx === 0 || ly === 0 || lx === pixelSize - 1 || ly === pixelSize - 1;
+        const cross = lx === ly || lx + ly === pixelSize - 1;
+        const color = edge || cross ? [255, 0, 220] : [52, 36, 52];
+        const dest = at * 4;
+        raw[dest] = color[0]; raw[dest + 1] = color[1]; raw[dest + 2] = color[2]; raw[dest + 3] = 255;
+        zBuffer[at] = block.y + 1;
+      }
+      continue;
+    }
     for (const { element, pixels, uv, rotateY, uvRotation, tint } of faces) {
       const y = block.y + element.to[1] / 16;
       const baseMinX = element.from[0] / 16, baseMaxX = element.to[0] / 16;
