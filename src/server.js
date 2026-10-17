@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +28,14 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
   const sessions = new Map(), failures = new Map();
+  const markerHistory = new Map();
+  const rememberMarker = (token, command) => {
+    const history = markerHistory.get(token) ?? { undo: [], redo: [] };
+    history.undo.push(command);
+    if (history.undo.length > 50) history.undo.shift();
+    history.redo = [];
+    markerHistory.set(token, history);
+  };
   const getSession = req => {
     const token = (req.get('cookie') ?? '').split(';').map(v => v.trim()).find(v => v.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
     const session = token && sessions.get(token);
@@ -72,7 +80,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) sessions.delete(active.token);
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -172,6 +180,73 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       }
     } catch (error) { res.status(400).json({ error: error.message || 'Could not import this Litematic.' }); }
     finally { db?.close(); await rm(temporary, { force: true }).catch(() => {}); }
+  });
+  app.post('/api/project/markers', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const marker = saveMarker(db, req.body.marker, req.body.expectedRevision);
+      rememberMarker(getSession(req).token, { id: marker.id, before: null, after: readMarker(db, marker.id) });
+      try {
+        const saved = await generation.saveMetadata(snapshotProject(db));
+        res.status(201).json({ marker, saved, status: generation.queue.status });
+      } catch (error) { res.status(202).json({ marker, saved: false, revision: marker.revision, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning section|floor/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.put('/api/project/markers/:id', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const before = readMarker(db, req.params.id);
+      const marker = saveMarker(db, req.body.marker, req.body.expectedRevision, req.params.id, { preserveDisplayedPosition: req.body.preserveDisplayedPosition === true });
+      rememberMarker(getSession(req).token, { id: marker.id, before, after: readMarker(db, marker.id) });
+      try {
+        const saved = await generation.saveMetadata(snapshotProject(db));
+        res.json({ marker, saved, status: generation.queue.status });
+      } catch (error) { res.status(202).json({ marker, saved: false, revision: marker.revision, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning section|floor/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.delete('/api/project/markers/:id', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const before = readMarker(db, req.params.id);
+      const result = deleteMarker(db, req.params.id, req.body.expectedRevision);
+      rememberMarker(getSession(req).token, { id: req.params.id, before, after: null });
+      try {
+        const saved = await generation.saveMetadata(snapshotProject(db));
+        res.json({ ...result, saved, status: generation.queue.status });
+      } catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/markers/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const active = getSession(req);
+    const history = markerHistory.get(active.token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'];
+    const command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no marker edit to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = restoreMarker(db, command.id, direction === 'undo' ? command.before : command.after, req.body.expectedRevision);
+      source.pop(); target.push(command); markerHistory.set(active.token, history);
+      try {
+        const saved = await generation.saveMetadata(snapshotProject(db));
+        res.json({ ...result, saved, status: generation.queue.status });
+      } catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|section no longer/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
   });
   app.post('/api/assets/upload', requireEditor, requireSameOrigin, reserveAssetSetup, express.raw({ type: 'application/octet-stream', limit: '128mb' }), async (req, res) => {
     const temporary = path.join(dataDir, `asset-upload-${randomBytes(12).toString('hex')}.jar`);

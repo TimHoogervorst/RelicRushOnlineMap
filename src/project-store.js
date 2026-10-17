@@ -54,6 +54,7 @@ export function openProject(path) {
     CREATE TABLE IF NOT EXISTS floors (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, floor_id TEXT NOT NULL REFERENCES floors(id), name TEXT NOT NULL, bounds_json TEXT NOT NULL, placement_x INTEGER NOT NULL DEFAULT 0, placement_z INTEGER NOT NULL DEFAULT 0, label_x REAL NOT NULL DEFAULT 0, label_z REAL NOT NULL DEFAULT 0, provenance_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_chunks (section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE, chunk_x INTEGER NOT NULL, chunk_y INTEGER NOT NULL, chunk_z INTEGER NOT NULL, format_version INTEGER NOT NULL, blob BLOB NOT NULL, PRIMARY KEY(section_id, chunk_x, chunk_y, chunk_z));
+    CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id));
   `);
   const sectionColumns = new Set(db.pragma('table_info(sections)').map(column => column.name));
   if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
@@ -74,6 +75,77 @@ export function advanceProjectRevision(db, expectedRevision = projectRevision(db
   return expectedRevision + 1;
 }
 
+const BUILT_IN_MARKER_TYPES = new Set(['chest', 'relic', 'shop', 'stairs', 'other']);
+function validateMarker(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Marker data is required.');
+  if (typeof input.type !== 'string' || !BUILT_IN_MARKER_TYPES.has(input.type)) throw new Error('Choose a supported marker type.');
+  if (typeof input.name !== 'string' || !input.name.trim() || input.name.trim().length > 80) throw new Error('Marker name must contain 1–80 characters.');
+  if (input.description !== undefined && (typeof input.description !== 'string' || input.description.length > 500)) throw new Error('Marker description must be 500 characters or fewer.');
+  if (![input.x, input.z].every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) throw new Error('Marker coordinates must be finite block coordinates.');
+}
+
+/** Save a marker mutation atomically with the caller's expected project revision. */
+export function saveMarker(db, input, expectedRevision, id = null, { preserveDisplayedPosition = false } = {}) {
+  validateMarker(input);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const target = db.prepare('SELECT id,floor_id,placement_x,placement_z FROM sections WHERE id=?').get(input.sectionId);
+  if (!target) throw new Error('Choose an existing owning section.');
+  let x = input.x, z = input.z;
+  if (id && preserveDisplayedPosition) {
+    const current = db.prepare('SELECT m.*,s.floor_id,s.placement_x,s.placement_z FROM markers m JOIN sections s ON s.id=m.section_id WHERE m.id=?').get(id);
+    if (!current) throw new Error('Marker does not exist.');
+    if (current.floor_id !== target.floor_id) throw new Error('Changing floors requires an explicit new position.');
+    x = current.x + current.placement_x - target.placement_x;
+    z = current.z + current.placement_z - target.placement_z;
+  }
+  const tx = db.transaction(() => {
+    if (id) {
+      const result = db.prepare('UPDATE markers SET section_id=?,type=?,name=?,description=?,x=?,z=? WHERE id=?').run(input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z, id);
+      if (result.changes !== 1) throw new Error('Marker does not exist.');
+    } else {
+      id = randomUUID();
+      db.prepare('INSERT INTO markers(id,section_id,type,name,description,x,z) VALUES(?,?,?,?,?,?,?)').run(id, input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z);
+    }
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { id, sectionId: input.sectionId, type: input.type, name: input.name.trim(), description: input.description ?? '', x, z, revision: expectedRevision + 1 };
+}
+
+export function deleteMarker(db, id, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const tx = db.transaction(() => {
+    const result = db.prepare('DELETE FROM markers WHERE id=?').run(id);
+    if (result.changes !== 1) throw new Error('Marker does not exist.');
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { revision: expectedRevision + 1 };
+}
+
+export function readMarker(db, id) {
+  const row = db.prepare('SELECT id,section_id AS sectionId,type,name,description,x,z,stair_destination_id AS stairDestinationId FROM markers WHERE id=?').get(id);
+  return row ?? null;
+}
+
+/** Apply a marker command's before/after value as one revisioned project mutation. */
+export function restoreMarker(db, id, marker, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const tx = db.transaction(() => {
+    if (marker === null) db.prepare('DELETE FROM markers WHERE id=?').run(id);
+    else {
+      validateMarker(marker);
+      if (!db.prepare('SELECT 1 FROM sections WHERE id=?').get(marker.sectionId)) throw new Error('The marker section no longer exists.');
+      db.prepare(`INSERT INTO markers(id,section_id,type,name,description,x,z,stair_destination_id) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET section_id=excluded.section_id,type=excluded.type,name=excluded.name,description=excluded.description,x=excluded.x,z=excluded.z,stair_destination_id=excluded.stair_destination_id`)
+        .run(id, marker.sectionId, marker.type, marker.name, marker.description ?? '', marker.x, marker.z, marker.stairDestinationId ?? null);
+    }
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { revision: expectedRevision + 1 };
+}
+
 export function snapshotProject(db) {
   const revision = projectRevision(db);
   const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
@@ -88,7 +160,12 @@ export function snapshotProject(db) {
     const maxY = Math.max(1, ...sections.map(section => section.bounds.y));
     const blocks = sections.flatMap(section => readSectionBlocks(db, section.id).map(block => ({ ...block, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
     for (const section of sections) { section.placementX -= minX; section.placementZ -= minZ; }
-    return { ...floor, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections };
+    const markers = db.prepare(`SELECT m.id,m.section_id AS sectionId,m.type,m.name,m.description,m.x,m.z,m.stair_destination_id AS stairDestinationId,s.placement_x AS sectionX,s.placement_z AS sectionZ FROM markers m JOIN sections s ON s.id=m.section_id WHERE s.floor_id=? ORDER BY m.id`).all(floor.id).map(marker => ({
+      id: marker.id, sectionId: marker.sectionId, type: marker.type, name: marker.name, description: marker.description,
+      x: marker.x + marker.sectionX - minX, z: marker.z + marker.sectionZ - minZ,
+      localX: marker.x, localZ: marker.z, stairDestinationId: marker.stairDestinationId
+    }));
+    return { ...floor, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers };
   }) };
 }
 

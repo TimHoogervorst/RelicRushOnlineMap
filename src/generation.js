@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
@@ -53,7 +53,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
             throw new Error(`Renderer produced invalid PNG output for floor ${floor.name}.`);
           }
-          floors.push({ id: floor.id, name: floor.name, image: output, sections: floor.sections, ...rendered });
+          floors.push({ id: floor.id, name: floor.name, image: output, sections: floor.sections, markers: floor.markers ?? [], ...rendered });
         }
         progress('Writing revision snapshot', 90);
         const manifest = { manifestVersion: 1, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
@@ -73,6 +73,44 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
     });
   }
 
+  /** Publish marker-only metadata into a new immutable release while reusing its terrain PNGs. */
+  async function saveMetadata(snapshot) {
+    return queue.enqueue(snapshot.revision, async ({ isLatest, progress }) => {
+      await mkdir(releasesDir, { recursive: true });
+      const pointer = JSON.parse(await readFile(path.join(releasesDir, 'current.json'), 'utf8'));
+      if (pointer.revision >= snapshot.revision) throw new Error('Stale revision; reload and retry your edit.');
+      const previousDir = path.join(releasesDir, pointer.directory);
+      const previousProject = JSON.parse(await readFile(path.join(previousDir, 'project.json'), 'utf8'));
+      const geometry = value => (value.floors ?? []).map(({ id, dimensions, blocks, sections }) => ({ id, dimensions, blocks, sections }));
+      if (JSON.stringify(geometry(previousProject)) !== JSON.stringify(geometry(snapshot))) throw new Error('Geometry has not been saved yet. Save the complete project before marker changes.');
+      const previousManifest = JSON.parse(await readFile(path.join(previousDir, 'manifest.json'), 'utf8'));
+      const tempName = `.building-${snapshot.revision}-${randomUUID()}`;
+      const temporary = path.join(releasesDir, tempName);
+      const final = path.join(releasesDir, `revision-${snapshot.revision}`);
+      await mkdir(temporary, { recursive: false });
+      try {
+        const floors = [];
+        for (const oldFloor of previousManifest.floors) {
+          const floor = snapshot.floors.find(item => item.id === oldFloor.id);
+          if (!floor) throw new Error('Marker-only save cannot change the floor list.');
+          await copyFile(path.join(previousDir, oldFloor.image), path.join(temporary, oldFloor.image));
+          floors.push({ ...oldFloor, sections: floor.sections, markers: floor.markers ?? [] });
+        }
+        if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
+        progress('Writing marker revision', 90);
+        const manifest = { ...previousManifest, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
+        await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
+        await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));
+        await rm(final, { recursive: true, force: true });
+        await rename(temporary, final);
+        if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
+        await atomicJson(path.join(releasesDir, 'current.json'), { revision: snapshot.revision, directory: `revision-${snapshot.revision}` });
+        progress('Saved', 100);
+        return { revision: snapshot.revision, floors: floors.length, rendered: false };
+      } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
+    });
+  }
+
   async function currentManifest(floorId) {
     const pointer = JSON.parse(await readFile(path.join(releasesDir, 'current.json'), 'utf8'));
     if (!/^revision-[0-9]+$/.test(pointer.directory) || Number(pointer.directory.slice(9)) !== pointer.revision) throw new Error('Invalid saved revision pointer');
@@ -85,5 +123,5 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
     }
     return manifest;
   }
-  return { queue, save, currentManifest, releasesDir };
+  return { queue, save, saveMetadata, currentManifest, releasesDir };
 }
