@@ -32,4 +32,23 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 .sidebar-reopen[hidden], [hidden] { display: none !important; }
 #setup-status, #login-status { min-height: 20px; }
 .map-caption { position: absolute; left: 19px; bottom: 17px; padding: 9px 12px; border-radius: 5px; background: #171d1bdb; border: 1px solid #303a34; color: #b5c1ac; font: 10px 'DM Mono', monospace; letter-spacing: .06em; }
+#marker-layer { position: absolute; inset: 0; pointer-events: none; }
+.map-marker { position: absolute; width: 28px; height: 28px; min-width: 28px; padding: 0; border: 2px solid #fff; border-radius: 50%; background-color: #18201d; background-repeat: no-repeat; background-position: center; background-size: 21px; transform: translate(-50%,-50%); box-shadow: 0 2px 8px #000b; pointer-events: auto; }
+.map-marker[hidden] { display: none; }
+.map-marker.highlighted { outline: 3px solid #f2d36b; outline-offset: 3px; z-index: 2; }
+#marker-layer.editing .map-marker { cursor: move; touch-action: none; }
+#marker-popup { position: absolute; z-index: 3; min-width: 190px; max-width: 280px; padding: 14px 32px 10px 14px; color: #e8e5dc; background: #171d1bf2; border: 1px solid #87977c; border-radius: 7px; box-shadow: 0 8px 28px #000b; }
+#marker-popup p { margin: 7px 0 2px; color: #c0c8bc; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+#popup-close { position: absolute; right: 4px; top: 4px; min-width: 25px; width: 25px; height: 25px; padding: 0; }
+#legend-groups details { border-top: 1px solid #303a34; padding: 8px 0; }
+#legend-groups summary { cursor: pointer; color: #d8dfd2; font-size: 12px; }
+.legend-entry { display: flex; align-items: center; gap: 8px; width: 100%; height: auto; min-height: 34px; margin-top: 5px; text-align: left; font-family: Manrope, sans-serif; }
+.legend-entry img { width: 22px; height: 22px; }
+.coordinate-inputs { display: flex; gap: 8px; margin-top: 5px; }
+.coordinate-inputs input, #marker-form textarea, #marker-form select, #marker-form input:not([type=hidden]):not([type=checkbox]) { width: 100%; padding: 7px; color: #e5e7df; background: #202825; border: 1px solid #37413b; border-radius: 5px; font: 12px Manrope, sans-serif; }
+#marker-form input[type=checkbox] { width: auto; margin: 0 6px 0 0; vertical-align: middle; }
+#marker-form label { display: block; margin: 8px 0; }
+#marker-form button { margin: 4px 3px 0 0; }
+.marker-row { display: block; margin: 5px 0; padding: 6px; border-left: 3px solid #73896a; }
+.marker-actions { display: flex; gap: 6px; margin: 8px 0; }
 @media (max-width: 600px) { .toolbar { height: 58px; gap: 10px; padding: 0 12px; } .brand strong { font-size: 12px; } .brand small, .floor-picker { display: none; } #viewport { height: calc(100vh - 58px); } .actions { gap: 5px; } button { height: 32px; } }

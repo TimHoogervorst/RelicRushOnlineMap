@@ -55,3 +55,21 @@ test('invalid renderer output cannot replace a complete revision', async () => {
     assert.equal((await generation.currentManifest('f1')).projectRevision, 1);
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
+
+test('metadata-only release advances the public manifest without rerendering floor images', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-generation-metadata-'));
+  let renders = 0;
+  const renderer = { async render({ output }) { renders++; await writeFile(output, png); return { width: 1, height: 1, bounds: { width: 1, depth: 1 }, renderer: { pixelSize: 16 } }; } };
+  const generation = createGenerationService({ dataDir, assetsDir: path.join(dataDir, 'assets'), renderer });
+  const snapshot = (revision, markers = []) => ({ revision, floors: [{ id: 'f1', name: 'Floor 1', dimensions: { x: 1, y: 1, z: 1 }, blocks: [{ x: 0, y: 0, z: 0, id: 'minecraft:stone' }], sections: [{ id: 's1', name: 'Entry', placementX: 0, placementZ: 0 }], markers }] });
+  try {
+    await generation.save(snapshot(1));
+    const firstImage = await readFile(path.join(dataDir, 'releases', 'revision-1', 'f1.png'));
+    await generation.saveMetadata(snapshot(2, [{ id: 'm1', sectionId: 's1', type: 'chest', name: 'Chest A', x: 61.5, z: 34.5, localX: 61.5, localZ: 34.5 }]));
+    const manifest = await generation.currentManifest('f1');
+    assert.equal(renders, 1);
+    assert.equal(manifest.projectRevision, 2);
+    assert.equal(manifest.markers[0].x, 61.5);
+    assert.deepEqual(await readFile(path.join(dataDir, 'releases', 'revision-2', 'f1.png')), firstImage);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
