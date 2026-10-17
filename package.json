@@ -1,0 +1,31 @@
+{
+  "name": "rr-map",
+  "version": "1.0.0",
+  "description": "Planning for a Docker-hosted Minecraft dungeon map with integrated block, floor, section, and marker editing.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TimHoogervorst/RR-Map.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/TimHoogervorst/RR-Map/issues"
+  },
+  "homepage": "https://github.com/TimHoogervorst/RR-Map#readme",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "deepslate": "^0.27.2",
+    "express": "^5.3.0",
+    "gl-matrix": "^3.4.4",
+    "sharp": "^0.35.5",
+    "zod": "^4.6.7"
+  }
+}
