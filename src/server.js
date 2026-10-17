@@ -8,6 +8,7 @@ import { decodeLitematic } from './litematic.js';
 import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
+import { createProjectBackup, restoreProjectBackup } from './backup-service.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -36,6 +37,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const connectionHistory = new Map();
   const renderSettingsHistory = new Map();
   const lifecycleHistory = new Map();
+  let restoreBusy = false, backupBusy = false, protectedRequests = 0;
   const rememberMarker = (token, command) => {
     const history = markerHistory.get(token) ?? { undo: [], redo: [] };
     history.undo.push(command);
@@ -92,8 +94,11 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
 
   const protectNamespace = (req, res, next) => requireEditor(req, res, () => {
-    if (/^(POST|PUT|PATCH|DELETE)$/.test(req.method)) return requireSameOrigin(req, res, next);
-    next();
+    if (restoreBusy && req.path !== '/restore') return res.status(503).json({ error: 'A project restore is in progress. Retry after it finishes.' });
+    if (backupBusy && req.path !== '/export') return res.status(503).json({ error: 'A project backup snapshot is in progress. Retry after it finishes.' });
+    const proceed = () => { protectedRequests++; let released = false; res.once('finish', () => { if (!released) { released = true; protectedRequests--; } }); next(); };
+    if (/^(POST|PUT|PATCH|DELETE)$/.test(req.method)) return requireSameOrigin(req, res, proceed);
+    proceed();
   });
   const reserveAssetSetup = (_req, res, next) => {
     if (assetSetupBusy) return res.status(409).json({ error: 'Asset setup is already running. Try again when it finishes.' });
@@ -108,11 +113,13 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
 
   app.get('/health', (_req, res) => res.status(workerState.ready ? 200 : 503).json({ status: workerState.ready ? 'ok' : 'starting', worker: workerState }));
   app.get('/api/map/manifest', async (_req, res) => {
+    if (restoreBusy) return res.status(503).json({ error: 'The map is being restored. Refresh after the restore completes.' });
     try {
       return res.set('Cache-Control', 'no-cache').json(await generation.currentManifest(_req.query.floor));
     } catch { res.status(503).json({ error: 'The public map is not generated yet.', detail: workerState.warning ?? 'Set up matching Minecraft assets in Edit.' }); }
   });
   app.get('/api/map/image', async (_req, res) => {
+    if (restoreBusy) return res.status(503).type('text').send('The map is being restored. Refresh after the restore completes.');
     try {
       const revision = String(_req.query.revision ?? '');
       if (!/^[0-9]+$/.test(revision)) throw new Error('Invalid release revision');
@@ -126,6 +133,39 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     } catch { res.status(503).type('text').send('The public map is not available until matching Minecraft assets are configured.'); }
   });
   app.get('/api/status', (_req, res) => res.json({ initialized: workerState.ready, mapAvailable: Boolean(workerState.rendered), warning: workerState.warning ?? null }));
+  app.get('/api/backups/export', requireEditor, async (_req, res) => {
+    if (backupBusy || restoreBusy) return res.status(409).json({ error: 'Another backup or restore is already in progress.' });
+    backupBusy = true;
+    try {
+      if (['saving', 'unsaved'].includes(generation.queue.status.state)) return res.status(409).json({ error: 'Wait for the active map save to finish before downloading a project backup.' });
+      const drainStarted = Date.now(); while (protectedRequests > 1) { if (Date.now() - drainStarted > 30000) return res.status(503).json({ error: 'Could not pause active editor requests for backup. Try again shortly.' }); await new Promise(resolve => setTimeout(resolve, 25)); }
+      if (assetSetupBusy) return res.status(409).json({ error: 'Wait for asset setup to finish before downloading a project backup.' });
+      const archive = await createProjectBackup({ dataDir }); res.set('Cache-Control', 'no-store').type('application/zip').attachment('rr-map-project.zip').send(archive);
+    } catch (error) { res.status(503).json({ error: `Project backup could not be created: ${error.message}` }); }
+    finally { backupBusy = false; }
+  });
+  app.get('/api/backups/recovery', requireEditor, async (_req, res) => {
+    try { const directory = path.join(dataDir, 'backups', 'recovery'); const names = await readdir(directory); res.json({ snapshots: names.filter(name => /^\d{4}-.*\.zip$/.test(name)).sort().reverse().slice(0, 5) }); }
+    catch (error) { if (error.code === 'ENOENT') return res.json({ snapshots: [] }); res.status(503).json({ error: 'Recovery snapshots are unavailable.' }); }
+  });
+  app.get('/api/backups/recovery/:name', requireEditor, async (req, res) => {
+    if (!/^\d{4}-[\dTZ-]+-[0-9a-f-]+\.zip$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid recovery snapshot name.' });
+    try { const archive = await readFile(path.join(dataDir, 'backups', 'recovery', req.params.name)); res.type('application/zip').attachment(req.params.name).send(archive); }
+    catch { res.status(404).json({ error: 'Recovery snapshot not found.' }); }
+  });
+  app.post('/api/backups/restore', requireEditor, requireSameOrigin, express.raw({ type: ['application/zip', 'application/octet-stream'], limit: '1gb' }), async (req, res) => {
+    if (restoreBusy) return res.status(409).json({ error: 'Another project restore is already running.' });
+    restoreBusy = true;
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Choose a project backup ZIP first.' });
+      if (['saving', 'unsaved'].includes(generation.queue.status.state)) return res.status(409).json({ error: 'Wait for the active map save to finish before restoring a project backup.' });
+      const drainStarted = Date.now(); while (protectedRequests > 1) { if (Date.now() - drainStarted > 30000) return res.status(503).json({ error: 'Could not pause active editor requests for restore. Try again shortly.' }); await new Promise(resolve => setTimeout(resolve, 25)); }
+      const result = await restoreProjectBackup({ dataDir, bytes: req.body, confirm: req.get('x-confirm-restore') });
+      startWorker(false);
+      res.json({ ...result, message: 'Project restored. Reload the map to see the restored revision.' });
+    } catch (error) { res.status(400).json({ error: error.message || 'Project restore failed. The existing project was preserved.' }); }
+    finally { restoreBusy = false; }
+  });
   app.get('/api/editor/project', requireEditor, async (_req, res) => {
     const source = path.join(dataDir, 'assets', 'minecraft', 'asset-source.json');
     const packSource = path.join(dataDir, 'assets', 'resource-pack', 'resource-pack-source.json');

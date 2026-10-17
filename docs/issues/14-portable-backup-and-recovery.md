@@ -1,6 +1,6 @@
 # 14 — Download, restore and recover a complete map project
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -27,5 +27,11 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+- Added `GET /api/backups/export`, authenticated recovery snapshot listing/download, and `POST /api/backups/restore`.
+- The version 1 ZIP contains a SQLite Online Backup API snapshot, extracted Minecraft/resource-pack assets, every immutable release (including the active map and project snapshot), and a SHA-256/size manifest. Sessions, secrets, temporary uploads and `.building-*` jobs are excluded.
+- ZIP paths, duplicates, symlinks, CRCs, decoded byte limits, manifest hashes, schema version, SQLite integrity/foreign keys, and release pointer/image references are checked before staging. Restore requires the exact `RESTORE PROJECT` confirmation, drains active authenticated project requests, stages on the data volume, makes a pre-restore recovery archive, then swaps the project database/assets/releases with rollback. If rollback itself cannot finish, it retains and reports the rollback directory.
+- Recovery archives live under `/data/backups/recovery`; retention removes only snapshots older than the latest five. It does not clean the active asset or release directories.
+- The editor exposes download, restore, progress/error status and recovery links, and gives local-to-Docker transfer instructions.
+- Verification: `npm.cmd test -- --test-name-pattern="portable backup|corrupt archive|recovery keeps|backup archive|authenticated owner downloads"` (16 passing, 0 failing); `npm.cmd run typecheck` (pass). Includes authenticated API, unauthorized access, fresh-volume file/database restore, corrupted archive preservation and five-snapshot retention.
+- Remaining acceptance gate: run the restore journey with Docker Engine/browser available and verify anonymous map refresh against the restored generated image. Contract: restore is a destructive, explicitly confirmed whole-project replacement; ZIP v1 is limited to 1 GiB compressed, 512 MiB per file and 2 GiB decoded.
 

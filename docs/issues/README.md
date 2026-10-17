@@ -21,7 +21,7 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 | [11 — Create and maintain custom marker types](11-custom-marker-types.md) | The owner can organize new kinds of points of interest without changing code. | In progress | 05 |
 | [12 — Refine map readability with cutaways and resource packs](12-render-readability-controls.md) | The owner can expose obscured paths and tune map appearance without changing source schematics. | In progress | 06 |
 | [13 — Manage floors and sections without dangling references](13-floor-section-lifecycle.md) | The owner can reorganize or remove areas without silently losing markers or breaking connections. | In progress | 09, 10, 11 |
-| [14 — Download, restore and recover a complete map project](14-portable-backup-and-recovery.md) | The owner can move the entire project between local and hosted Docker instances and recover mistakes. | Blocked | 07, 12, 13 |
+| [14 — Download, restore and recover a complete map project](14-portable-backup-and-recovery.md) | The owner can move the entire project between local and hosted Docker instances and recover mistakes. | In progress | 07, 12, 13 |
 | [15 — Verify the complete Docker workflow and document operation](15-first-release-journey-and-handoff.md) | The owner can start locally, maintain the dungeon and move it to a server using documented steps. | Blocked | 14 |
 
 ## Fresh-session start
