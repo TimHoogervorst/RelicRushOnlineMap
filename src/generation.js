@@ -53,7 +53,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
             throw new Error(`Renderer produced invalid PNG output for floor ${floor.name}.`);
           }
-          floors.push({ id: floor.id, name: floor.name, image: output, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], ...rendered });
+          floors.push({ id: floor.id, name: floor.name, image: output, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], connections: floor.connections ?? [], ...rendered });
         }
         progress('Writing revision snapshot', 90);
         const manifest = { manifestVersion: 1, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
@@ -92,12 +92,12 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
         const floors = [];
         for (const oldFloor of previousManifest.floors) {
           const floor = snapshot.floors.find(item => item.id === oldFloor.id);
-          if (!floor) throw new Error('Marker-only save cannot change the floor list.');
+          if (!floor) throw new Error('Metadata-only save cannot change the floor list.');
           await copyFile(path.join(previousDir, oldFloor.image), path.join(temporary, oldFloor.image));
-          floors.push({ ...oldFloor, sections: floor.sections, markers: floor.markers ?? [] });
+          floors.push({ ...oldFloor, sections: floor.sections, markers: floor.markers ?? [], connections: floor.connections ?? [] });
         }
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
-        progress('Writing marker revision', 90);
+        progress('Writing metadata revision', 90);
         const manifest = { ...previousManifest, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));

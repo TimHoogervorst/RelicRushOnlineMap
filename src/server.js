@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +31,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const markerHistory = new Map();
   const blockHistory = new Map();
   const sectionHistory = new Map();
+  const connectionHistory = new Map();
   const rememberMarker = (token, command) => {
     const history = markerHistory.get(token) ?? { undo: [], redo: [] };
     history.undo.push(command);
@@ -82,7 +83,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -186,6 +187,68 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
     } catch (error) {
       const status = /another editor tab|does not exist|collision|history/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  const rememberConnection = (token, command) => {
+    const history = connectionHistory.get(token) ?? { undo: [], redo: [] };
+    history.undo.push(command); if (history.undo.length > 50) history.undo.shift(); history.redo = []; connectionHistory.set(token, history);
+  };
+  const publishConnections = async (db, res, statusCode = 200, payload = {}) => {
+    const result = { revision: projectRevision(db) };
+    try { await generation.saveMetadata(snapshotProject(db)); return res.status(statusCode).json({ ...result, ...payload, saved: true, status: generation.queue.status }); }
+    catch (error) { return res.status(202).json({ ...result, ...payload, saved: false, warning: error.message, status: generation.queue.status }); }
+  };
+  app.post('/api/project/connections', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const before = null, connection = saveSectionConnection(db, req.body.connection, req.body.expectedRevision);
+      rememberConnection(getSession(req).token, { id: connection.id, before, after: readSectionConnection(db, connection.id) });
+      return await publishConnections(db, res, 201, { id: connection.id, connection });
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning sections|different sections|same floor/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.put('/api/project/connections/:id', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const before = readSectionConnection(db, req.params.id);
+      const connection = saveSectionConnection(db, req.body.connection, req.body.expectedRevision, req.params.id);
+      rememberConnection(getSession(req).token, { id: connection.id, before, after: readSectionConnection(db, connection.id) });
+      return await publishConnections(db, res, 200, { id: connection.id, connection });
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning sections|different sections|same floor/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.delete('/api/project/connections/:id', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const before = readSectionConnection(db, req.params.id);
+      deleteSectionConnection(db, req.params.id, req.body.expectedRevision);
+      rememberConnection(getSession(req).token, { id: req.params.id, before, after: null });
+      return await publishConnections(db, res);
+    } catch (error) {
+      const status = /another editor tab|does not exist/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/connections/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const token = getSession(req).token, history = connectionHistory.get(token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'], command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no connection edit to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = restoreSectionConnection(db, command.id, direction === 'undo' ? command.before : command.after, req.body.expectedRevision);
+      source.pop(); target.push(command); connectionHistory.set(token, history);
+      return await publishConnections(db, res);
+    } catch (error) {
+      const status = /another editor tab|does not exist|owning sections|different sections|same floor/i.test(error.message) ? 409 : 400;
       res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });

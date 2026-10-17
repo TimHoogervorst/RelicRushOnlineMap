@@ -12,8 +12,26 @@ let zoom = 1, offsetX = 0, offsetY = 0, pointer = null, slicePreviewActive = fal
 function drawTransform() { frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`; }
 function fitFloor() {
   if (!image.naturalWidth) return;
-  zoom = Math.min((viewport.clientWidth - 64) / image.naturalWidth, (viewport.clientHeight - 64) / image.naturalHeight, 1.5);
-  offsetX = 0; offsetY = 0; drawTransform();
+  let minX = 0, minY = 0, maxX = image.naturalWidth, maxY = image.naturalHeight;
+  const pixels = floorManifest?.renderer?.pixelSize ?? 16, depth = floorManifest?.bounds?.depth ?? 1;
+  const include = (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); };
+  for (const section of floorManifest?.sections ?? []) {
+    const x = (section.placementX + section.labelX) * pixels, y = (depth - 1 - section.placementZ - section.labelZ) * pixels;
+    const halfWidth = Math.max(17, section.name.length * 3.5 + 8); include(x - halfWidth, y - 14); include(x + halfWidth, y + 14);
+  }
+  for (const marker of floorManifest?.markers ?? []) include(marker.x * pixels, marker.z * pixels);
+  for (const link of floorManifest?.connections ?? []) {
+    for (const point of [link.displayA, link.displayB]) include(point.x * pixels, (depth - 1 - point.z) * pixels);
+    if (link.label) {
+      const x = (link.displayA.x + link.displayB.x) * pixels / 2, y = (depth - 1 - (link.displayA.z + link.displayB.z) / 2) * pixels;
+      include(x - link.label.length * 3.5, y - 12); include(x + link.label.length * 3.5, y + 3);
+    }
+  }
+  const width = maxX - minX, height = maxY - minY;
+  zoom = Math.min((viewport.clientWidth - 64) / width, (viewport.clientHeight - 64) / height, 1.5);
+  offsetX = -((minX + maxX) / 2 - image.naturalWidth / 2) * zoom;
+  offsetY = -((minY + maxY) / 2 - image.naturalHeight / 2) * zoom;
+  drawTransform();
 }
 function setZoom(value, anchorX = viewport.clientWidth / 2, anchorY = viewport.clientHeight / 2) {
   const next = Math.min(12, Math.max(.15, value));
@@ -86,6 +104,7 @@ async function loadFloor(floorId) {
   const sections = (floorManifest.sections ?? []).map(section => section.name).join(' · ');
   document.querySelector('#caption').textContent = `${sections || floorManifest.name} · ${floorManifest.name} · ${floorManifest.bounds.width} × ${floorManifest.bounds.depth}`;
   renderMarkers();
+  renderConnections();
   renderSectionLabels();
   renderLayoutConflicts();
 }
@@ -367,6 +386,50 @@ viewport.addEventListener('drop', async event => {
   await saveSelectedBlock();
 });
 
+function renderConnections() {
+  if (!floorManifest) return;
+  const svg = document.querySelector('#section-connections');
+  const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1;
+  svg.setAttribute('viewBox', `0 0 ${image.naturalWidth || image.width} ${image.naturalHeight || image.height}`);
+  svg.replaceChildren();
+  for (const connection of floorManifest.connections ?? []) {
+    const ax = connection.displayA.x * pixels, ay = (depth - 1 - connection.displayA.z) * pixels;
+    const bx = connection.displayB.x * pixels, by = (depth - 1 - connection.displayB.z) * pixels;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', String(ax)); line.setAttribute('y1', String(ay)); line.setAttribute('x2', String(bx)); line.setAttribute('y2', String(by)); line.setAttribute('class', 'section-connection-line');
+    line.dataset.connectionId = connection.id; svg.append(line);
+    for (const [x, y] of [[ax, ay], [bx, by]]) {
+      const endpoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      endpoint.setAttribute('cx', String(x)); endpoint.setAttribute('cy', String(y)); endpoint.setAttribute('r', '5'); endpoint.setAttribute('class', 'section-connection-endpoint'); svg.append(endpoint);
+    }
+    if (connection.label) {
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', String((ax + bx) / 2)); label.setAttribute('y', String((ay + by) / 2 - 8)); label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'section-connection-label'); label.textContent = connection.label; svg.append(label);
+    }
+  }
+  const select = document.querySelector('#connection-select'), previousId = select.value;
+  select.replaceChildren(new Option('New connection', ''), ...(floorManifest.connections ?? []).map(item => new Option(item.label || `${sectionName(item.sectionAId)} ↔ ${sectionName(item.sectionBId)}`, item.id)));
+  if ((floorManifest.connections ?? []).some(item => item.id === previousId)) select.value = previousId;
+  const sections = floorManifest.sections ?? [];
+  for (const id of ['connection-a', 'connection-b']) {
+    const sectionSelect = document.querySelector(`#${id}`), previousSection = sectionSelect.value;
+    sectionSelect.replaceChildren(...sections.map(section => new Option(section.name, section.id)));
+    if (sections.some(section => section.id === previousSection)) sectionSelect.value = previousSection;
+  }
+  const selected = (floorManifest.connections ?? []).find(item => item.id === select.value);
+  const form = document.querySelector('#connection-form');
+  document.querySelector('#connection-delete').hidden = !selected;
+  if (selected && document.activeElement !== form.querySelector('input:focus')) {
+    document.querySelector('#connection-a').value = selected.sectionAId; document.querySelector('#connection-b').value = selected.sectionBId;
+    for (const [id, value] of [['connection-x-a', selected.xA], ['connection-z-a', selected.zA], ['connection-x-b', selected.xB], ['connection-z-b', selected.zB], ['connection-label', selected.label]]) document.querySelector(`#${id}`).value = value;
+  }
+  if (!selected) {
+    if (sections.length > 1 && document.querySelector('#connection-a').value === document.querySelector('#connection-b').value) document.querySelector('#connection-b').selectedIndex = 1;
+    for (const id of ['connection-x-a', 'connection-z-a', 'connection-x-b', 'connection-z-b']) if (!document.querySelector(`#${id}`).value) document.querySelector(`#${id}`).value = '0.5';
+  }
+}
+function sectionName(id) { return floorManifest?.sections.find(section => section.id === id)?.name ?? 'Section'; }
+
 function renderMarkers() {
   if (!floorManifest) return;
   const markers = floorManifest.markers ?? [];
@@ -446,6 +509,41 @@ function renderMarkers() {
   }
   if (!groups.childElementCount) groups.innerHTML = '<p>No markers on this floor.</p>';
 }
+function connectionFormValue() {
+  return { sectionAId: document.querySelector('#connection-a').value, xA: Number(document.querySelector('#connection-x-a').value), zA: Number(document.querySelector('#connection-z-a').value), sectionBId: document.querySelector('#connection-b').value, xB: Number(document.querySelector('#connection-x-b').value), zB: Number(document.querySelector('#connection-z-b').value), label: document.querySelector('#connection-label').value };
+}
+document.querySelector('#connection-select').addEventListener('change', renderConnections);
+document.querySelector('#connection-new').addEventListener('click', () => { document.querySelector('#connection-select').value = ''; document.querySelector('#connection-delete').hidden = true; document.querySelector('#connection-x-a').value = '0.5'; document.querySelector('#connection-z-a').value = '0.5'; document.querySelector('#connection-x-b').value = '0.5'; document.querySelector('#connection-z-b').value = '0.5'; document.querySelector('#connection-label').value = ''; if (floorManifest?.sections.length > 1) { document.querySelector('#connection-a').selectedIndex = 0; document.querySelector('#connection-b').selectedIndex = 1; } });
+document.querySelector('#connection-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const status = document.querySelector('#connection-status'), id = document.querySelector('#connection-select').value;
+  const response = await fetch(id ? `/api/project/connections/${encodeURIComponent(id)}` : '/api/project/connections', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, connection: connectionFormValue() }) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  status.textContent = result.saved ? 'Connection saved.' : `Connection saved locally; ${result.warning}. Use Save to retry.`;
+  if (result.connection) document.querySelector('#connection-select').value = result.connection.id;
+  if (result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+});
+document.querySelector('#connection-delete').addEventListener('click', async () => {
+  const id = document.querySelector('#connection-select').value;
+  if (!id) return;
+  const response = await fetch(`/api/project/connections/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json(), status = document.querySelector('#connection-status');
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; document.querySelector('#connection-select').value = ''; status.textContent = 'Connection deleted.';
+  setSaveStatus(result.status ?? { state: 'saved' }); if (result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+});
+async function connectionHistoryCommand(direction) {
+  const response = await fetch(`/api/project/connections/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json(), status = document.querySelector('#connection-status');
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' }); status.textContent = `Connection ${direction} complete.`;
+  if (result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+}
+document.querySelector('#connection-undo').addEventListener('click', () => void connectionHistoryCommand('undo'));
+document.querySelector('#connection-redo').addEventListener('click', () => void connectionHistoryCommand('redo'));
+
 function readMarkerVisibility(floorId, type) {
   try { const value = JSON.parse(localStorage.getItem(`rr-marker-visibility:${floorId}`) ?? '{}'); return value[type] !== false; } catch { return true; }
 }
