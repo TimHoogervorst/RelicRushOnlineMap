@@ -8,6 +8,25 @@ import { createGenerationService } from '../src/generation.js';
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1]);
 
+test('content hashes are stable across revisions and object key order', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-hashes-'));
+  const renderer = { async render({ output }) { await writeFile(output, png); return { width: 1, height: 1, bounds: { width: 1, depth: 1 }, heightGrid: { width: 1, depth: 1, values: [[null]] } }; } };
+  const generation = createGenerationService({ dataDir, assetsDir: path.join(dataDir, 'assets'), renderer });
+  const first = { revision: 1, floors: [{ id: 'f1', name: 'Floor', dimensions: { x: 1, y: 1, z: 1 }, blocks: [], sections: [], renderOptions: { pixelSize: 16 } }] };
+  const second = { floors: [{ renderOptions: { pixelSize: 16 }, sections: [], blocks: [], dimensions: { z: 1, y: 1, x: 1 }, name: 'Floor', id: 'f1' }], revision: 2 };
+  try {
+    await generation.save(first);
+    const firstManifest = JSON.parse(await readFile(path.join(dataDir, 'releases', 'revision-1', 'manifest.json')));
+    await generation.save(second);
+    const secondManifest = JSON.parse(await readFile(path.join(dataDir, 'releases', 'revision-2', 'manifest.json')));
+    assert.equal(firstManifest.projectRevision, 1);
+    assert.equal(secondManifest.projectRevision, 2);
+    assert.equal(secondManifest.projectHash, firstManifest.projectHash);
+    assert.equal(secondManifest.assetHash, firstManifest.assetHash);
+    assert.equal(secondManifest.renderSettingsHash, firstManifest.renderSettingsHash);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test('publishes image, manifest, and project snapshot through one revision pointer', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-generation-'));
   const renderer = { async render({ output }) { await writeFile(output, png); return { width: 1, height: 1, bounds: { width: 1, depth: 1 } }; } };
