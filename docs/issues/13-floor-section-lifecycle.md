@@ -1,6 +1,6 @@
 # 13 — Manage floors and sections without dangling references
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -27,5 +27,9 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implemented protected, revisioned API operations for floor/section rename and ordering, section ownership changes, dependency listing, and floor/section deletion. Section deletion returns marker/connection/stair dependents until the caller supplies an explicit marker delete/reassign choice and the complete connection deletion list; all relationship cleanup and row deletion run in one SQLite transaction. Stable IDs are retained on rename, reorder, and reassignment. Floor 0 and the starting section are protected. Section moves reject existing same-floor dotted links and stair links that would become same-floor. Floor removal either requires an empty floor or a destination floor and validates its section/stair/connection topology. Lifecycle controls are available in the authenticated editor. Metadata saves now carry floor name/order and section order into visitor manifests.
+
+Verification: `npm test` (60/60 passed); `npm run typecheck` passed. New tests cover stale revisions, both connection constraints, dependency reporting, failed reassignment rollback, built-in protection, authenticated API access, visitor manifest refresh after rename, and delete/undo restoration.
+
+Undo/redo is session scoped, bounded to ten lifecycle commands, revision checked, and restores floors, sections, markers, stair links, connections, chunks, and render settings transactionally. Undo and redo create new generated visitor revisions. Restored legacy references are exposed in authenticated project metadata as `unresolvedRecords`; visitor stair navigation reports missing or incompatible destinations without throwing. Browser interaction and Docker acceptance remain open, so the ticket stays in progress.
 

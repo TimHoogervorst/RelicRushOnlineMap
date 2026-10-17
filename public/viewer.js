@@ -687,7 +687,12 @@ function centerMarker(marker) {
 }
 async function refreshPublicManifest() {
   const response = await fetch('/api/map/manifest', { cache: 'no-store' });
-  if (response.ok) publicMap = await response.json();
+  if (response.ok) {
+    publicMap = await response.json();
+    const selector = document.querySelector('#floor'), selected = selector.value;
+    selector.replaceChildren(...publicMap.floors.map(floor => new Option(floor.name, floor.id)));
+    selector.value = publicMap.floors.some(floor => floor.id === selected) ? selected : (publicMap.floors[0]?.id ?? '');
+  }
 }
 async function followStair(marker) {
   if (!marker.stairDestinationId) { showMarkerPopup(marker, 'Destination not yet mapped.'); return; }
@@ -841,6 +846,8 @@ async function refreshSession() {
       : 'No matching assets are configured yet.';
     const floors = await fetch('/api/project/floors').then(result => result.json());
     projectRevision = floors.revision;
+    const lifecycleFloor = document.querySelector('#lifecycle-floor-target');
+    lifecycleFloor.replaceChildren(...floors.floors.map(floor => new Option(floor.name, floor.id)));
     await loadBlockPalette();
     const selector = document.querySelector('#import-floor');
     selector.replaceChildren(new Option('Create a new floor', ''));
@@ -850,6 +857,48 @@ async function refreshSession() {
     if (visibleHeight < 256 && floorManifest) updateSlicePreview();
   } else { slicePreviewActive = false; selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); }
 }
+
+async function lifecycleRequest(url, method, payload) {
+  const response = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, expectedRevision: projectRevision }) });
+  const result = await response.json();
+  const status = document.querySelector('#lifecycle-status'); status.textContent = response.ok ? (result.saved ? 'Saved. Visitors will see this change on refresh.' : `Change saved locally; ${result.warning}. Use Save to retry.`) : result.error;
+  if (result.status) setSaveStatus(result.status);
+  if (response.ok) { await refreshPublicManifest(); await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+  return { response, result };
+}
+const lifecycleValue = id => document.querySelector(id).value.trim();
+async function lifecycleHistoryCommand(direction) {
+  const response = await fetch(`/api/project/lifecycle/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json();
+  document.querySelector('#lifecycle-status').textContent = response.ok ? (result.saved ? `${direction === 'undo' ? 'Undo' : 'Redo'} saved.` : `Change applied; ${result.warning}. Use Save to retry.`) : result.error;
+  if (result.status) setSaveStatus(result.status);
+  if (response.ok) { await refreshPublicManifest(); await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+}
+document.querySelector('#lifecycle-undo').addEventListener('click', () => void lifecycleHistoryCommand('undo'));
+document.querySelector('#lifecycle-redo').addEventListener('click', () => void lifecycleHistoryCommand('redo'));
+document.querySelector('#lifecycle-rename-floor').addEventListener('click', () => void lifecycleRequest(`/api/project/floors/${encodeURIComponent(document.querySelector('#floor').value)}`,'PUT',{name:lifecycleValue('#lifecycle-name')}));
+document.querySelector('#lifecycle-rename-section').addEventListener('click', () => void lifecycleRequest(`/api/project/sections/${encodeURIComponent(document.querySelector('#layout-section').value)}/name`,'PUT',{name:lifecycleValue('#lifecycle-name')}));
+document.querySelector('#lifecycle-move-section').addEventListener('click', () => void lifecycleRequest(`/api/project/sections/${encodeURIComponent(document.querySelector('#layout-section').value)}/floor`,'PUT',{floorId:document.querySelector('#lifecycle-floor-target').value}));
+document.querySelector('#lifecycle-delete-section').addEventListener('click', async () => {
+  const sectionId = document.querySelector('#layout-section').value;
+  const { response, result } = await lifecycleRequest(`/api/project/sections/${encodeURIComponent(sectionId)}`,'DELETE',{resolution:null});
+  if (response.ok) return;
+  const dependents = result.dependents;
+  if (!dependents || !confirm(`Delete section ${sectionId}? It has ${dependents.markers.length} markers, ${dependents.connections.length} section connections, and ${dependents.stairPartners.length} linked stair partners.`)) return;
+  const action = dependents.markers.length ? prompt('Type delete to remove markers, or enter a same-floor section ID to reassign them:', 'delete') : 'delete';
+  if (!action) return;
+  const resolution = { markers: action === 'delete' ? 'delete' : 'reassign', sectionId: action === 'delete' ? null : action, deleteConnections: dependents.connections.map(item => item.id), stairLinks: 'unlink' };
+  if (dependents.connections.length && !confirm(`Remove these section connections: ${resolution.deleteConnections.join(', ')}?`)) return;
+  await lifecycleRequest(`/api/project/sections/${encodeURIComponent(sectionId)}`,'DELETE',{resolution});
+});
+document.querySelector('#lifecycle-delete-floor').addEventListener('click', async () => {
+  const floorId = document.querySelector('#floor').value;
+  const floors = await fetch('/api/project/floors').then(response => response.json());
+  const options = floors.floors.filter(floor => floor.id !== floorId);
+  const destination = prompt(`Type another floor ID to move every section to, or leave empty to delete only an empty floor. Available: ${options.map(item => `${item.id} (${item.name})`).join(', ')}`,'');
+  if (destination === null || !confirm(`Delete floor ${floorId}? This keeps stable IDs for reassigned sections.`)) return;
+  await lifecycleRequest(`/api/project/floors/${encodeURIComponent(floorId)}`,'DELETE',{resolution: destination ? { destinationFloorId: destination } : null});
+});
 document.querySelector('#edit-mode').addEventListener('click', async () => {
   editorOpen = !editorOpen;
   if (editorOpen) await refreshSession();
