@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, saveSectionRenderSettings, restoreSectionRenderSettings } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
 
@@ -30,6 +30,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
   const sessions = new Map(), failures = new Map();
   const markerHistory = new Map();
+  const markerTypeHistory = new Map();
   const blockHistory = new Map();
   const sectionHistory = new Map();
   const connectionHistory = new Map();
@@ -85,7 +86,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -143,6 +144,44 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       const project = snapshotProject(db);
       res.json({ revision: project.revision, stairs: project.floors.flatMap(floor => floor.markers.filter(marker => marker.type === 'stairs').map(marker => ({ ...marker, floorId: floor.id, floorName: floor.name }))) });
     } catch (error) { res.status(500).json({ error: error.message }); }
+    finally { db.close(); }
+  });
+  app.get('/api/project/marker-types', requireEditor, (_req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try { res.json({ revision: projectRevision(db), types: listMarkerTypes(db) }); }
+    finally { db.close(); }
+  });
+  const saveTypeMutation = async (req, res, { id = null, deleting = false } = {}) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = saveCustomMarkerType(db, { id, type: deleting ? null : req.body.type, replacementType: deleting ? (req.body.replacementType ?? null) : null }, req.body.expectedRevision);
+      const history = markerTypeHistory.get(getSession(req).token) ?? { undo: [], redo: [] };
+      history.undo.push(result.command); if (history.undo.length > 50) history.undo.shift(); history.redo = []; markerTypeHistory.set(getSession(req).token, history);
+      try {
+        const saved = await generation.saveMetadata(snapshotProject(db));
+        return res.status(id ? 200 : 201).json({ ...result, saved: true, status: generation.queue.status });
+      } catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const conflict = /another editor tab|Custom marker type does not exist/i.test(error.message);
+      return res.status(conflict ? 409 : 400).json({ error: error.message });
+    } finally { db.close(); }
+  };
+  app.post('/api/project/marker-types', requireEditor, requireSameOrigin, (req, res) => void saveTypeMutation(req, res));
+  app.put('/api/project/marker-types/:id', requireEditor, requireSameOrigin, (req, res) => void saveTypeMutation(req, res, { id: req.params.id }));
+  app.delete('/api/project/marker-types/:id', requireEditor, requireSameOrigin, (req, res) => void saveTypeMutation(req, res, { id: req.params.id, deleting: true }));
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/marker-types/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const active = getSession(req), history = markerTypeHistory.get(active.token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'], command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no marker type change to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = restoreCustomMarkerTypeCommand(db, command, direction === 'undo' ? { type: command.before, markers: command.affectedBefore } : { type: command.after, markers: command.affectedAfter }, req.body.expectedRevision);
+      source.pop(); target.push(command); markerTypeHistory.set(active.token, history);
+      try { const saved = await generation.saveMetadata(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) { return res.status(/another editor tab/i.test(error.message) ? 409 : 400).json({ error: error.message }); }
     finally { db.close(); }
   });
   app.get('/api/project/height-range', requireEditor, async (req, res) => {

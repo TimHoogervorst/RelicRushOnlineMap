@@ -18,7 +18,7 @@ The [implementation spec](../implementation-spec.md) and [glossary](../../GLOSSA
 | [08 — Arrange entire sections with their markers and labels](08-whole-section-layout.md) | The owner can spread dungeon areas apart while preserving their points of interest. | In progress | 05 |
 | [09 — Draw dotted connections between section entrances](09-dotted-section-connections.md) | Visitors can understand that sections separated in the displayed layout connect in the dungeon. | In progress | 08 |
 | [10 — Connect stair markers and navigate between floors](10-stair-floor-navigation.md) | Visitors can follow stairs to the corresponding location on another floor. | In progress | 08 |
-| [11 — Create and maintain custom marker types](11-custom-marker-types.md) | The owner can organize new kinds of points of interest without changing code. | Blocked | 05 |
+| [11 — Create and maintain custom marker types](11-custom-marker-types.md) | The owner can organize new kinds of points of interest without changing code. | In progress | 05 |
 | [12 — Refine map readability with cutaways and resource packs](12-render-readability-controls.md) | The owner can expose obscured paths and tune map appearance without changing source schematics. | In progress | 06 |
 | [13 — Manage floors and sections without dangling references](13-floor-section-lifecycle.md) | The owner can reorganize or remove areas without silently losing markers or breaking connections. | Blocked | 09, 10, 11 |
 | [14 — Download, restore and recover a complete map project](14-portable-backup-and-recovery.md) | The owner can move the entire project between local and hosted Docker instances and recover mistakes. | Blocked | 07, 12, 13 |

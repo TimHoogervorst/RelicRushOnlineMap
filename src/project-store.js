@@ -56,6 +56,7 @@ export function openProject(path) {
     CREATE TABLE IF NOT EXISTS section_render_settings (section_id TEXT PRIMARY KEY REFERENCES sections(id) ON DELETE CASCADE, settings_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_chunks (section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE, chunk_x INTEGER NOT NULL, chunk_y INTEGER NOT NULL, chunk_z INTEGER NOT NULL, format_version INTEGER NOT NULL, blob BLOB NOT NULL, PRIMARY KEY(section_id, chunk_x, chunk_y, chunk_z));
     CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id));
+    CREATE TABLE IF NOT EXISTS custom_marker_types (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_connections (id TEXT PRIMARY KEY, section_a_id TEXT NOT NULL REFERENCES sections(id), x_a REAL NOT NULL, z_a REAL NOT NULL, section_b_id TEXT NOT NULL REFERENCES sections(id), x_b REAL NOT NULL, z_b REAL NOT NULL, label TEXT NOT NULL DEFAULT '', CHECK(section_a_id <> section_b_id));
     CREATE TRIGGER IF NOT EXISTS section_connection_same_floor_insert BEFORE INSERT ON section_connections
       WHEN (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_b_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) <> (SELECT floor_id FROM sections WHERE id=NEW.section_b_id)
@@ -87,9 +88,97 @@ export function advanceProjectRevision(db, expectedRevision = projectRevision(db
 }
 
 const BUILT_IN_MARKER_TYPES = new Set(['chest', 'relic', 'shop', 'stairs', 'other']);
+const CUSTOM_MARKER_ICONS = new Set(['chest', 'relic', 'shop', 'other']);
+export const BUILT_IN_MARKER_TYPE_DATA = [
+  { id: 'chest', name: 'Chests', color: '#d89032', icon: 'chest', builtIn: true },
+  { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'relic', builtIn: true },
+  { id: 'shop', name: 'Shops', color: '#55ae70', icon: 'shop', builtIn: true },
+  { id: 'stairs', name: 'Stairs', color: '#57a9d6', icon: 'stairs', builtIn: true },
+  { id: 'other', name: 'Other', color: '#aab3ba', icon: 'other', builtIn: true }
+];
+
+export function listMarkerTypes(db) {
+  return [...BUILT_IN_MARKER_TYPE_DATA, ...db.prepare('SELECT id,name,color,icon FROM custom_marker_types ORDER BY name COLLATE NOCASE,id').all().map(type => ({ ...type, builtIn: false }))];
+}
+
+function validateCustomMarkerType(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Marker type data is required.');
+  if (typeof input.name !== 'string' || !input.name.trim() || input.name.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(input.name)) throw new Error('Type name must contain 1–40 plain-text characters.');
+  if (typeof input.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(input.color)) throw new Error('Choose a six-digit hex color.');
+  if (typeof input.icon !== 'string' || !CUSTOM_MARKER_ICONS.has(input.icon)) throw new Error('Choose a bundled marker icon.');
+  return { name: input.name.trim(), color: input.color.toLowerCase(), icon: input.icon };
+}
+
+function readCustomMarkerType(db, id) {
+  return db.prepare('SELECT id,name,color,icon FROM custom_marker_types WHERE id=?').get(id) ?? null;
+}
+
+/** Create, update or delete a custom marker type; deletion and marker reassignment share one transaction. */
+export function saveCustomMarkerType(db, { id = null, type, replacementType = null }, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (id !== null && (typeof id !== 'string' || !/^custom_[0-9a-f-]{36}$/.test(id))) throw new Error('Custom marker type does not exist.');
+  const before = id ? readCustomMarkerType(db, id) : null;
+  if (id && !before) throw new Error('Custom marker type does not exist.');
+  const after = type === null ? null : { ...(id ? { id } : {}), ...validateCustomMarkerType(type) };
+  let actualId = id;
+  let affectedBefore = [];
+  if (id && after === null) {
+    const count = db.prepare('SELECT COUNT(*) count FROM markers WHERE type=?').get(id).count;
+    if (count && typeof replacementType !== 'string') throw new Error('Choose a replacement type for markers in this group.');
+    if (replacementType !== null && replacementType !== id && !BUILT_IN_MARKER_TYPES.has(replacementType) && !readCustomMarkerType(db, replacementType)) throw new Error('Choose an existing replacement marker type.');
+    if (replacementType === id) throw new Error('Choose a different replacement marker type.');
+    affectedBefore = db.prepare('SELECT id,type,stair_destination_id AS stairDestinationId FROM markers WHERE type=?').all(id);
+  } else if (replacementType !== null) throw new Error('A replacement is only used when deleting a type.');
+  const tx = db.transaction(() => {
+    let saved = after;
+    if (id && after === null) {
+      if (affectedBefore.length) {
+        db.prepare('UPDATE markers SET type=?,stair_destination_id=NULL WHERE type=?').run(replacementType, id);
+        // Remove reciprocal links to any moved marker; custom groups ordinarily cannot be stairs, but legacy data may contain them.
+        for (const marker of affectedBefore) if (marker.stairDestinationId) db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id=?').run(marker.stairDestinationId);
+      }
+      db.prepare('DELETE FROM custom_marker_types WHERE id=?').run(id);
+      saved = null;
+    } else if (id) {
+      db.prepare('UPDATE custom_marker_types SET name=?,color=?,icon=? WHERE id=?').run(after.name, after.color, after.icon, id);
+    } else {
+      const newId = `custom_${randomUUID()}`;
+      actualId = newId;
+      saved = { ...after, id: newId };
+      db.prepare('INSERT INTO custom_marker_types(id,name,color,icon) VALUES(?,?,?,?)').run(newId, saved.name, saved.color, saved.icon);
+    }
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  const savedType = id ? (after ? { ...after, id } : null) : { ...after, id: actualId };
+  const affectedAfter = id && after === null ? affectedBefore.map(marker => ({ ...marker, type: replacementType, stairDestinationId: null })) : [];
+  return { type: savedType, revision: expectedRevision + 1, command: { id: actualId, before, after: savedType, affectedBefore, affectedAfter } };
+}
+
+/** Apply a type command snapshot for per-session undo/redo. */
+export function restoreCustomMarkerTypeCommand(db, command, target, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const tx = db.transaction(() => {
+    const existing = readCustomMarkerType(db, command.id);
+    if (target.type) {
+      const { name, color, icon } = validateCustomMarkerType(target.type);
+      if (existing) db.prepare('UPDATE custom_marker_types SET name=?,color=?,icon=? WHERE id=?').run(name, color, icon, command.id);
+      else db.prepare('INSERT INTO custom_marker_types(id,name,color,icon) VALUES(?,?,?,?)').run(command.id, name, color, icon);
+    } else {
+      const references = db.prepare('SELECT id FROM markers WHERE type=?').all(command.id).map(marker => marker.id);
+      const reassigned = new Set((target.markers ?? []).filter(marker => marker.type !== command.id).map(marker => marker.id));
+      if (existing && references.some(markerId => !reassigned.has(markerId))) throw new Error('Reassign or delete markers before undoing this type creation.');
+      db.prepare('DELETE FROM custom_marker_types WHERE id=?').run(command.id);
+    }
+    for (const marker of target.markers ?? []) db.prepare('UPDATE markers SET type=?,stair_destination_id=? WHERE id=?').run(marker.type, marker.stairDestinationId ?? null, marker.id);
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { revision: expectedRevision + 1 };
+}
 function validateMarker(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Marker data is required.');
-  if (typeof input.type !== 'string' || !BUILT_IN_MARKER_TYPES.has(input.type)) throw new Error('Choose a supported marker type.');
+  if (typeof input.type !== 'string' || (!BUILT_IN_MARKER_TYPES.has(input.type) && !/^custom_[0-9a-f-]{36}$/.test(input.type))) throw new Error('Choose a supported marker type.');
   if (typeof input.name !== 'string' || !input.name.trim() || input.name.trim().length > 80) throw new Error('Marker name must contain 1–80 characters.');
   if (input.description !== undefined && (typeof input.description !== 'string' || input.description.length > 500)) throw new Error('Marker description must be 500 characters or fewer.');
   if (![input.x, input.z].every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) throw new Error('Marker coordinates must be finite block coordinates.');
@@ -98,6 +187,7 @@ function validateMarker(input) {
 /** Save a marker mutation atomically with the caller's expected project revision. */
 export function saveMarker(db, input, expectedRevision, id = null, { preserveDisplayedPosition = false, confirmUnlink = false } = {}) {
   validateMarker(input);
+  if (!BUILT_IN_MARKER_TYPES.has(input.type) && !readCustomMarkerType(db, input.type)) throw new Error('Choose an existing marker type.');
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
   const target = db.prepare('SELECT id,floor_id,placement_x,placement_z FROM sections WHERE id=?').get(input.sectionId);
   if (!target) throw new Error('Choose an existing owning section.');
@@ -193,6 +283,7 @@ export function restoreMarker(db, id, marker, expectedRevision) {
     }
     else {
       validateMarker(marker);
+      if (!BUILT_IN_MARKER_TYPES.has(marker.type) && !readCustomMarkerType(db, marker.type)) throw new Error('The marker type no longer exists.');
       const owner = db.prepare('SELECT floor_id FROM sections WHERE id=?').get(marker.sectionId);
       if (!owner) throw new Error('The marker section no longer exists.');
       if (marker.stairDestinationId) {
@@ -284,6 +375,7 @@ export function snapshotProject(db) {
   const revision = projectRevision(db);
   const renderOptionsRow = db.prepare("SELECT value FROM project_meta WHERE key='render_options'").get();
   const renderOptions = renderOptionsRow ? JSON.parse(renderOptionsRow.value) : { pixelSize: 16, heightShadePerBlock: 0.018 };
+  const markerTypes = listMarkerTypes(db);
   const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
   return { revision, floors: floors.map(floor => {
     const sections = db.prepare(`SELECT s.id,s.name,s.bounds_json,s.placement_x,s.placement_z,s.label_x,s.label_z,r.settings_json
@@ -318,7 +410,7 @@ export function snapshotProject(db) {
       displayA: { x: connection.ax + connection.xA - minX, z: connection.az + connection.zA - minZ },
       displayB: { x: connection.bx + connection.xB - minX, z: connection.bz + connection.zB - minZ }
     }));
-    return { ...floor, renderOptions, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections };
+    return { ...floor, renderOptions, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections, markerTypes };
   }) };
 }
 
