@@ -88,6 +88,22 @@ test('rasterizer layers resource pack textures and rejects unsafe dimensions and
   await assert.rejects(renderOrthographic({ dimensions: { x: 1000, y: 1, z: 1000 }, blocks: [] }, { assets: vanilla, output: path.join(dir, 'large.png'), pixelSize: 32 }), /8,000,000 pixel safety limit/);
 });
 
+test('rasterizer reports partial rendered surfaces and explicit empty cells in deterministic Z rows', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-height-grid-')), assets = path.join(dir, 'assets');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const folder of ['blockstates', 'models/block', 'textures/block']) await mkdir(path.join(assets, folder), { recursive: true });
+  for (const [name, height] of [['half', 8], ['full', 16]]) {
+    await writeFile(path.join(assets, 'blockstates', `${name}.json`), JSON.stringify({ variants: { '': { model: `minecraft:block/${name}` } } }));
+    await writeFile(path.join(assets, 'models/block', `${name}.json`), JSON.stringify({ textures: { all: 'minecraft:block/stone' }, elements: [{ from: [0,0,0], to: [16,height,16], faces: { up: { texture: '#all', uv: [0,0,16,16] } } }] }));
+  }
+  await sharp({ create: { width: 16, height: 16, channels: 4, background: { r: 120, g: 120, b: 120, alpha: 1 } } }).png().toFile(path.join(assets, 'textures/block/stone.png'));
+  const result = await renderOrthographic({ dimensions: { x: 3, y: 7, z: 1 }, blocks: [
+    { x: 0, y: 0, z: 0, id: 'minecraft:half', properties: {} },
+    { x: 1, y: 5, z: 0, id: 'minecraft:full', properties: {} }
+  ] }, { assets, output: path.join(dir, 'height.png'), pixelSize: 8 });
+  assert.deepEqual(result.heightGrid, { width: 3, depth: 1, values: [[0.5, 6, null]] });
+});
+
 test('render settings API requires editor auth, saves, undoes/redoes, and survives server restart', async t => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-render-settings-api-'));
   const db = createProject(openProject(path.join(dataDir, 'project.sqlite')));

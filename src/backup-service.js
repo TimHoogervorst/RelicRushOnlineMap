@@ -73,7 +73,17 @@ function validateReferences(files) {
   if (!manifestBytes) throw new Error('Backup release pointer references a missing map revision.');
   let manifest; try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { throw new Error('Backup map manifest is invalid.'); }
   if (manifest.projectRevision !== pointer.revision || !Array.isArray(manifest.floors)) throw new Error('Backup map revision does not match its release pointer.');
-  for (const floor of manifest.floors) if (typeof floor.image !== 'string' || path.basename(floor.image) !== floor.image || !files.has(`releases/${pointer.directory}/${floor.image}`)) throw new Error('Backup map manifest references a missing or unsafe image.');
+  for (const floor of manifest.floors) {
+    if (typeof floor.image !== 'string' || path.basename(floor.image) !== floor.image || !files.has(`releases/${pointer.directory}/${floor.image}`)) throw new Error('Backup map manifest references a missing or unsafe image.');
+    if (floor.heightGrid) {
+      const relative = floor.heightGrid.path;
+      if (typeof relative !== 'string' || path.basename(relative) !== relative || !Number.isSafeInteger(floor.heightGrid.projectRevision) || !Number.isSafeInteger(floor.heightGrid.width) || !Number.isSafeInteger(floor.heightGrid.depth)) throw new Error('Backup map manifest references an unsafe height grid.');
+      const bytes = files.get(`releases/${pointer.directory}/${relative}`);
+      if (!bytes) throw new Error('Backup map manifest references a missing height grid.');
+      let grid; try { grid = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('Backup height grid is invalid.'); }
+      if (grid.format !== 'rr-map-surface-height-grid' || grid.version !== 1 || grid.floorId !== floor.id || grid.projectRevision !== floor.heightGrid.projectRevision || !Array.isArray(grid.values) || grid.values.length !== floor.heightGrid.depth || grid.values.some(row => !Array.isArray(row) || row.length !== floor.heightGrid.width)) throw new Error('Backup height grid does not match its manifest reference.');
+    }
+  }
 }
 
 export function validateProjectBackup(bytes) {
