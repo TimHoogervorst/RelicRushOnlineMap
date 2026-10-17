@@ -30,19 +30,20 @@ try {
     try { await stat(path.join(assetsDir, 'asset-source.json')); }
     catch { await extractMatchingAssets(workerData.clientJar, assetsDir); }
   }
-  if (!existingRelease && assetsDir) {
+  if ((!existingRelease || workerData.forceRender) && assetsDir) {
     const temp = path.join(releasesDir, `.building-${randomUUID()}`);
-    const final = path.join(releasesDir, 'revision-1');
+    const revision = (existingRelease?.revision ?? 0) + 1;
+    const final = path.join(releasesDir, `revision-${revision}`);
     await mkdir(temp, { recursive: true });
     try {
       const metadata = await renderer.render({ schematic, assets: assetsDir, output: path.join(temp, 'map.png') });
       let assetSource = null;
       try { assetSource = JSON.parse(await readFile(path.join(assetsDir, 'asset-source.json'), 'utf8')); } catch { /* supplied loose resource pack */ }
-      const manifest = { manifestVersion: 1, projectRevision: 1, floorId: 'floor-0', floorName: 'Floor 0', sectionId: 'section-start-0f', sectionName: 'Starting Area', ...metadata, generatedAt: new Date().toISOString(), blockCount: blocks.length, assetSource, provenance: JSON.parse(section.provenance_json) };
+      const manifest = { manifestVersion: 1, projectRevision: revision, floorId: 'floor-0', floorName: 'Floor 0', sectionId: 'section-start-0f', sectionName: 'Starting Area', ...metadata, generatedAt: new Date().toISOString(), blockCount: blocks.length, assetSource, provenance: JSON.parse(section.provenance_json) };
       await writeFile(path.join(temp, 'manifest.json'), JSON.stringify(manifest, null, 2));
       await rm(final, { recursive: true, force: true });
       await rename(temp, final);
-      await writeFile(`${currentPath}.tmp`, JSON.stringify({ revision: 1, directory: 'revision-1' }));
+      await writeFile(`${currentPath}.tmp`, JSON.stringify({ revision, directory: `revision-${revision}` }));
       await rename(`${currentPath}.tmp`, currentPath);
       rendered = true;
     } catch (error) {

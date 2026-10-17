@@ -11,11 +11,13 @@ Single-service Docker application for viewing and authoring the Relic Rush dunge
 
 ## Run locally
 
-1. Provide the matching Minecraft 26.3 client JAR at `assets/minecraft-client.jar` (world version 5023). The application extracts only blockstates, block models, and block textures into the persistent data volume. The client JAR is not copied into the image or committed.
-2. Copy `.env.example` to `.env` and change the editor password before authoring features are enabled.
-3. Run `docker compose up --build` and open <http://localhost:3000>.
+1. Copy `.env.example` to `.env`. `EDITOR_PASSWORD` defaults to `relic-local` for local testing; set a private value before hosting the app remotely.
+2. Run `docker compose up --build` and open <http://localhost:3000>.
+3. Select **Edit**, sign in with `EDITOR_PASSWORD`, choose the matching Minecraft 26.3 client JAR (world version 5023), and save assets. The JAR is written to a temporary private file, version checked, then removed. Only blockstates, block models, and block textures are stored in the persistent volume.
 
 Compose publishes only on localhost. For remote use, place it behind an HTTPS reverse proxy; do not publish port 3000 directly to the internet. `/health` reports service initialization, while `/api/map/manifest` reports when a generated public map is available. A missing asset JAR leaves the service running with a clear unavailable state; adding it and restarting allows the initial render. Existing releases remain available without render assets.
+
+The Edit button overlays a left sidebar without changing the map position. Close it with the visible reopen control; **Done editing** restores the public legend. Login sessions use a random eight-hour HttpOnly, SameSite=Lax cookie. Failed login attempts are limited per client IP. Cookie-authenticated writes and login/logout requests require a same-origin request. Uploads are capped at 128 MiB compressed, 16 MiB per extracted file, 512 MiB total extracted, and 100,000 selected ZIP entries. One asset setup may run at a time; concurrent uploads receive HTTP 409. Asset extraction runs in a worker thread, rejects duplicate/traversal paths, and removes the temporary JAR after success or failure. Set `TRUST_PROXY=true` only when the service is directly behind a trusted HTTPS-terminating proxy; this enables Express's single-hop forwarded protocol handling and Secure cookies. `COOKIE_SECURE=true` can force Secure cookies when TLS is terminated outside the configured proxy hop.
 
 Project SQLite state and immutable render releases live in the named `map-data` volume. The first run seeds Floor 0 and the Starting Area only when the database has no sections. Rebuilding the container or restarting the service does not replace existing project geometry. The imported schematic remains source provenance only after seeding; generation reads persisted chunks.
 

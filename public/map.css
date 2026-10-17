@@ -21,5 +21,15 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #map { display: block; image-rendering: pixelated; max-width: none; box-shadow: 0 22px 60px #0009; border: 1px solid #697267; }
 #message { position: absolute; inset: 0; display: grid; place-items: center; margin: auto; color: #b4bcae; font-size: 13px; text-align: center; padding: 30px; pointer-events: none; }
 #message[hidden] { display: none; }
+.sidebar { position: fixed; z-index: 4; left: 14px; top: 82px; bottom: 14px; width: 278px; overflow: auto; padding: 18px; background: #171d1bf2; border: 1px solid #354038; border-radius: 8px; box-shadow: 0 16px 50px #0008; }
+.sidebar[hidden] { display: none; }
+.sidebar h2 { margin: 0 0 14px; font-size: 14px; }
+.sidebar p, .sidebar label { color: #aeb8aa; font-size: 12px; line-height: 1.5; }
+.sidebar label, .sidebar input { display: block; margin: 10px 0; }
+.sidebar input[type="password"], .sidebar input[type="file"] { max-width: 100%; color: #e5e7df; font: 11px Manrope, sans-serif; }
+.sidebar-heading { display: flex; justify-content: space-between; align-items: center; }
+.sidebar-reopen { position: fixed; z-index: 4; left: 14px; top: 82px; box-shadow: 0 8px 30px #0008; }
+.sidebar-reopen[hidden], [hidden] { display: none !important; }
+#setup-status, #login-status { min-height: 20px; }
 .map-caption { position: absolute; left: 19px; bottom: 17px; padding: 9px 12px; border-radius: 5px; background: #171d1bdb; border: 1px solid #303a34; color: #b5c1ac; font: 10px 'DM Mono', monospace; letter-spacing: .06em; }
 @media (max-width: 600px) { .toolbar { height: 58px; gap: 10px; padding: 0 12px; } .brand strong { font-size: 12px; } .brand small, .floor-picker { display: none; } #viewport { height: calc(100vh - 58px); } .actions { gap: 5px; } button { height: 32px; } }

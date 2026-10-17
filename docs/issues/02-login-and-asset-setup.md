@@ -1,6 +1,6 @@
 # 02 — Unlock editing and configure Minecraft assets
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -25,5 +25,9 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Integrated from ticket commits `b275851` and `07a77bb`. Implemented server-side password login, expiring random HttpOnly/SameSite sessions, logout, login throttling, same-origin checks, namespace protection, the Edit/sidebar mode switch, authenticated client-JAR upload, bounded asset extraction in a worker, version/hash metadata, and temporary-upload cleanup. Failed/incompatible setup preserves the previously configured assets.
+
+**Verified on the host:** `npm.cmd test` (14/14) and `npm.cmd run typecheck`. Focused tests cover session expiry/cookies, throttling, cross-origin rejection, unauthenticated API boundaries, archive traversal/duplicates and compressed/expanded limits, successful version validation, prior-output preservation, and concurrent setup rejection.
+
+**Still open:** browser interaction and asset persistence through a service restart have not been exercised. Docker Engine is currently unreachable (`docker info` reports access denied on `//./pipe/docker_engine`), so Docker runtime acceptance is unverified. Ticket 01 also remains in progress. Keep this ticket **in progress** until the remaining runtime/browser checks are recorded.
 

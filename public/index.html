@@ -10,8 +10,16 @@
     <header class="toolbar">
       <div class="brand"><span class="mark">RR</span><div><strong>Relic Rush</strong><small>Dungeon map</small></div></div>
       <label class="floor-picker">Floor <select id="floor"><option value="floor-0">Floor 0</option></select></label>
-      <div class="actions"><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit floor</button></div>
+      <div class="actions"><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit floor</button><button id="edit-mode">Edit</button></div>
     </header>
+    <aside id="sidebar" class="sidebar" aria-label="Map sidebar">
+      <button id="sidebar-reopen" class="sidebar-reopen" aria-label="Open map sidebar" hidden>☰</button>
+      <section id="legend-panel"><h2>Legend</h2><p>Marker types will appear here.</p></section>
+      <section id="editor-panel" hidden><div class="sidebar-heading"><h2>Editing tools</h2><button id="sidebar-close" aria-label="Close sidebar">×</button></div>
+        <div id="login-panel"><p>Sign in to edit this map.</p><form id="login-form"><label for="editor-password">Editor password</label><input id="editor-password" name="password" type="password" autocomplete="current-password" required><button type="submit">Sign in</button><p id="login-status" role="status"></p></form></div>
+        <div id="setup-panel" hidden><p>Configure the Minecraft client assets used to render the map. The JAR is processed on this server and then removed.</p><label for="client-jar">Minecraft client JAR</label><input id="client-jar" type="file" accept=".jar,application/java-archive,application/zip"><button id="upload-assets">Save assets</button><p id="setup-status" role="status"></p><button id="logout">Log out</button></div>
+      </section>
+    </aside>
     <main id="viewport" aria-label="Dungeon map viewport">
       <div id="map-frame"><img id="map" alt="Overhead view of the starting dungeon area" draggable="false" hidden /></div>
       <section id="message" role="status">Loading map…</section>
