@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
@@ -10,7 +10,7 @@ import { createApp } from '../src/server.js';
 
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-auth-'));
-  const app = createApp({ dataDir, password: 'secret', initializeWorker: false, ...options });
+  const app = createApp({ dataDir, password: 'secret', initializeWorker: false, renderer: { async render({ output }) { await writeFile(output, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1])); return { width: 1, height: 1, bounds: { width: 1, depth: 1 } }; } }, ...options });
   const server = createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -93,12 +93,29 @@ test('authenticated owner imports a Litematic once and source upload is removed'
   const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
   const cookie = login.headers.get('set-cookie').split(';')[0];
   const bytes = await readFile(new URL('../schematics/Start 0F.litematic', import.meta.url));
-  const response = await fetch(`${origin}/api/project/import`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream', 'x-source-name': 'Start 0F.litematic', 'x-section-name': 'Cave', 'x-floor-name': 'Floor 3' }, body: bytes });
+  const response = await fetch(`${origin}/api/project/import`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream', 'x-project-revision': '0', 'x-source-name': 'Start 0F.litematic', 'x-section-name': 'Cave', 'x-floor-name': 'Floor 3' }, body: bytes });
   const payload = await response.json();
   assert.equal(response.status, 201, payload.error);
   const imported = payload;
   assert.equal(imported.blockCount, 3484);
   assert.equal(imported.createdFloor, true);
+  assert.equal(imported.saved.revision, 1);
+  const stale = await fetch(`${origin}/api/project/import`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/octet-stream', 'x-project-revision': '0' }, body: bytes });
+  assert.equal(stale.status, 409);
+  assert.match((await stale.json()).error, /another editor tab/i);
+  const status = await fetch(`${origin}/api/generation/status`, { headers: { cookie } }).then(result => result.json());
+  assert.equal(status.projectRevision, 1);
+  assert.equal(status.currentRevision, 1);
+  const staleSave = await fetch(`${origin}/api/generation/save`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: 0 }) });
+  assert.equal(staleSave.status, 409);
+  const manifestResponse = await fetch(`${origin}/api/map/manifest`, { cache: 'no-store' });
+  assert.match(manifestResponse.headers.get('cache-control'), /no-cache/);
+  const manifest = await manifestResponse.json();
+  assert.equal(manifest.projectRevision, 1);
+  const image = await fetch(`${origin}/api/map/image?revision=1&floor=${encodeURIComponent(imported.floorId)}`);
+  assert.equal(image.status, 200);
+  assert.match(image.headers.get('cache-control'), /immutable/);
+  assert.equal((await image.arrayBuffer()).byteLength, 24);
   const floors = await fetch(`${origin}/api/project/floors`, { headers: { cookie } }).then(result => result.json());
   assert.equal(floors.floors[0].name, 'Floor 3');
   assert.equal((await readdir(dataDir)).some(name => name.startsWith('schematic-upload-')), false);

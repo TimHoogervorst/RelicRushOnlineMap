@@ -31,7 +31,38 @@ function endPointer(event) { if (pointer?.id === event.pointerId) { pointer = nu
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
 image.addEventListener('load', fitFloor);
 
-let editorOpen = false, sidebarOpen = true;
+let editorOpen = false, sidebarOpen = true, projectRevision = 0, publicMap = null;
+function setSaveStatus(state) {
+  const target = document.querySelector('#save-status');
+  if (!target) return;
+  const progress = state.progress ? ` ${state.progress.phase} ${state.progress.percent}%` : '';
+  target.textContent = state.state === 'failed' ? `Failed: ${state.error}. Your edits are recoverable; retry Save.${progress}` : `${state.state[0].toUpperCase()}${state.state.slice(1)}${progress}`;
+}
+async function refreshSaveStatus() {
+  const response = await fetch('/api/generation/status', { cache: 'no-store' });
+  if (response.ok) { const state = await response.json(); projectRevision = state.projectRevision; setSaveStatus(state); }
+}
+async function saveProject() {
+  setSaveStatus({ state: 'saving', progress: { phase: 'Queued', percent: 0 } });
+  const poll = setInterval(() => void refreshSaveStatus(), 500);
+  try {
+    const response = await fetch('/api/generation/save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error ?? 'Save failed.');
+    setSaveStatus(result.status);
+  } catch (error) { setSaveStatus({ state: 'failed', error: error.message }); }
+  finally { clearInterval(poll); }
+}
+async function loadFloor(floorId) {
+  const response = await fetch(`/api/map/manifest?floor=${encodeURIComponent(floorId)}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('The saved floor is unavailable.');
+  const floorManifest = await response.json();
+  image.src = `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorId)}`;
+  image.hidden = false; message.hidden = true;
+  const sections = (floorManifest.sections ?? []).map(section => section.name).join(' · ');
+  document.querySelector('#caption').textContent = `${sections || floorManifest.name} · ${floorManifest.name} · ${floorManifest.bounds.width} × ${floorManifest.bounds.depth}`;
+}
+document.querySelector('#floor').addEventListener('change', event => loadFloor(event.target.value).catch(error => { message.textContent = error.message; message.hidden = false; }));
 function renderSidebar() {
   sidebar.hidden = !sidebarOpen;
   document.querySelector('#sidebar-reopen').hidden = sidebarOpen;
@@ -52,10 +83,12 @@ async function refreshSession() {
       ? `Minecraft ${project.assets.minecraftVersion} assets are configured.`
       : 'No matching assets are configured yet.';
     const floors = await fetch('/api/project/floors').then(result => result.json());
+    projectRevision = floors.revision;
     const selector = document.querySelector('#import-floor');
     selector.replaceChildren(new Option('Create a new floor', ''));
     for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
     document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
+    await refreshSaveStatus();
   }
 }
 document.querySelector('#edit-mode').addEventListener('click', async () => {
@@ -95,22 +128,24 @@ document.querySelector('#import-schematic').addEventListener('click', async () =
   const sectionName = document.querySelector('#import-section-name').value.trim() || file.name.replace(/\.litematic$/i, '');
   const floorId = document.querySelector('#import-floor').value;
   status.textContent = 'Validating and importing schematic…';
-  const headers = { 'content-type': 'application/octet-stream', 'x-source-name': file.name, 'x-section-name': sectionName, 'x-floor-name': document.querySelector('#import-floor-name').value.trim() || 'Floor 0' };
+  const headers = { 'content-type': 'application/octet-stream', 'x-project-revision': String(projectRevision), 'x-source-name': file.name, 'x-section-name': sectionName, 'x-floor-name': document.querySelector('#import-floor-name').value.trim() || 'Floor 0' };
   if (floorId) headers['x-floor-id'] = floorId;
   const response = await fetch('/api/project/import', { method: 'POST', headers, body: file });
   const result = await response.json();
   status.textContent = response.ok ? `Imported ${result.blockCount} blocks into ${sectionName}. The source upload was removed.` : result.error;
-  if (response.ok) await refreshSession();
+  if (result.status) setSaveStatus(result.status);
+  if (response.ok) { await refreshSession(); await loadFloor(document.querySelector('#floor').value); }
 });
+document.querySelector('#save-project').addEventListener('click', saveProject);
 renderSidebar();
 
 try {
   const response = await fetch('/api/map/manifest', { cache: 'no-store' });
   if (!response.ok) { const state = await response.json(); throw new Error(state.error ?? 'The starting map is not available yet.'); }
-  const manifest = await response.json();
-  image.src = `/api/map/image?revision=${encodeURIComponent(manifest.projectRevision)}`;
-  image.hidden = false; message.hidden = true;
-  document.querySelector('#caption').textContent = `${manifest.sectionName ?? 'Starting Area'} · Floor 0 · ${manifest.bounds.width} × ${manifest.bounds.depth}`;
+  publicMap = await response.json();
+  const selector = document.querySelector('#floor');
+  selector.replaceChildren(...publicMap.floors.map(floor => new Option(floor.name, floor.id)));
+  await loadFloor(selector.value);
 } catch (error) {
   message.textContent = error.message;
 }

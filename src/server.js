@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, snapshotProject } from './project-store.js';
+import { createGenerationService, renderInWorker } from './generation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -22,7 +23,7 @@ function originAllowed(req) {
   catch { return false; }
 }
 
-export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, assetExtractor } = {}) {
+export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, assetExtractor, renderer } = {}) {
   const app = express();
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
@@ -42,6 +43,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     job.once('exit', code => { if (code !== 0) reject(new Error(`Asset extraction worker exited (${code}).`)); });
   }));
   let workerState = { ready: false, error: null };
+  const generation = createGenerationService({ dataDir, renderer: renderer ?? { render: renderInWorker }, assetsDir: process.env.MINECRAFT_ASSETS ? path.resolve(process.env.MINECRAFT_ASSETS) : path.join(dataDir, 'assets', 'minecraft') });
   let activeWorker;
   let assetSetupBusy = false;
   const startWorker = (forceRender = false) => {
@@ -92,17 +94,20 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.get('/health', (_req, res) => res.status(workerState.ready ? 200 : 503).json({ status: workerState.ready ? 'ok' : 'starting', worker: workerState }));
   app.get('/api/map/manifest', async (_req, res) => {
     try {
-      const current = JSON.parse(await readFile(path.join(dataDir, 'releases', 'current.json'), 'utf8'));
-      const manifest = await readFile(path.join(dataDir, 'releases', current.directory, 'manifest.json'), 'utf8');
-      res.set('Cache-Control', 'no-cache').type('application/json').send(manifest);
+      return res.set('Cache-Control', 'no-cache').json(await generation.currentManifest(_req.query.floor));
     } catch { res.status(503).json({ error: 'The public map is not generated yet.', detail: workerState.warning ?? 'Set up matching Minecraft assets in Edit.' }); }
   });
   app.get('/api/map/image', async (_req, res) => {
     try {
-      const current = JSON.parse(await readFile(path.join(dataDir, 'releases', 'current.json'), 'utf8'));
-      const manifest = JSON.parse(await readFile(path.join(dataDir, 'releases', current.directory, 'manifest.json'), 'utf8'));
-      if (!/^revision-[0-9]+$/.test(current.directory) || path.basename(manifest.image) !== manifest.image) throw new Error('Invalid release manifest paths');
-      res.set('Cache-Control', 'public, max-age=300').type('png').send(await readFile(path.join(dataDir, 'releases', current.directory, manifest.image)));
+      const revision = String(_req.query.revision ?? '');
+      if (!/^[0-9]+$/.test(revision)) throw new Error('Invalid release revision');
+      const directory = `revision-${revision}`;
+      const manifest = JSON.parse(await readFile(path.join(dataDir, 'releases', directory, 'manifest.json'), 'utf8'));
+      if (manifest.projectRevision !== Number(revision)) throw new Error('Invalid release revision');
+      const floor = manifest.floors?.find(item => item.id === _req.query.floor);
+      const imageName = floor?.image ?? manifest.image;
+      if (path.basename(imageName) !== imageName) throw new Error('Invalid release manifest paths');
+      res.set('Cache-Control', `public, max-age=31536000, immutable`).type('png').send(await readFile(path.join(dataDir, 'releases', directory, imageName)));
     } catch { res.status(503).type('text').send('The public map is not available until matching Minecraft assets are configured.'); }
   });
   app.get('/api/status', (_req, res) => res.json({ initialized: workerState.ready, mapAvailable: Boolean(workerState.rendered), warning: workerState.warning ?? null }));
@@ -113,8 +118,34 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/project/floors', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
-    try { res.json({ floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
+    try { res.json({ revision: projectRevision(db), floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
     finally { db.close(); }
+  });
+  app.get('/api/generation/status', requireEditor, async (_req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      let currentRevision = 0;
+      try { currentRevision = JSON.parse(await readFile(path.join(dataDir, 'releases', 'current.json'), 'utf8')).revision; } catch { /* no complete public release yet */ }
+      const currentProjectRevision = projectRevision(db);
+      const status = { ...generation.queue.status };
+      if (status.revision === 0 && currentRevision >= currentProjectRevision) { status.state = 'saved'; status.revision = currentRevision; }
+      else if (status.state === 'saved' && currentRevision < currentProjectRevision) status.state = 'unsaved';
+      res.json({ ...status, projectRevision: currentProjectRevision, currentRevision });
+    }
+    finally { db.close(); }
+  });
+  app.post('/api/generation/save', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const revision = projectRevision(db);
+      if (!Number.isSafeInteger(req.body?.expectedRevision) || req.body.expectedRevision !== revision) return res.status(409).json({ error: 'This project changed in another editor tab. Reload and retry your edit.', projectRevision: revision });
+      const snapshot = snapshotProject(db);
+      const result = await generation.save(snapshot);
+      res.json({ ...result, status: generation.queue.status });
+    } catch (error) {
+      const status = /Stale revision|another editor tab/i.test(error.message) ? 409 : 503;
+      res.status(status).json({ error: error.message, status: generation.queue.status });
+    } finally { db.close(); }
   });
   app.post('/api/project/import', requireEditor, requireSameOrigin, express.raw({ type: 'application/octet-stream', limit: '128mb' }), async (req, res) => {
     const temporary = path.join(dataDir, `schematic-upload-${randomBytes(12).toString('hex')}.litematic`);
@@ -125,12 +156,20 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       await writeFile(temporary, req.body, { flag: 'wx', mode: 0o600 });
       const schematic = decodeLitematic(req.body);
       db = openProject(path.join(dataDir, 'project.sqlite'));
+      const revision = projectRevision(db);
+      if (!Number.isSafeInteger(Number(req.get('x-project-revision'))) || Number(req.get('x-project-revision')) !== revision) return res.status(409).json({ error: 'This project changed in another editor tab. Reload and retry your edit.', projectRevision: revision });
       const result = importSchematicSection(db, schematic, {
         floorId: req.get('x-floor-id') || null,
         floorName: req.get('x-floor-name') || 'Floor 0',
         sectionName: req.get('x-section-name') || path.basename(req.get('x-source-name') || 'Imported section', '.litematic')
       });
-      res.status(201).json(result);
+      const savedRevision = projectRevision(db);
+      try {
+        const saved = await generation.save(snapshotProject(db));
+        res.status(201).json({ ...result, saved, status: generation.queue.status });
+      } catch (error) {
+        res.status(202).json({ ...result, saved: false, projectRevision: savedRevision, status: generation.queue.status, warning: error.message });
+      }
     } catch (error) { res.status(400).json({ error: error.message || 'Could not import this Litematic.' }); }
     finally { db?.close(); await rm(temporary, { force: true }).catch(() => {}); }
   });
