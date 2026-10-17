@@ -21,6 +21,10 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #map { display: block; image-rendering: pixelated; max-width: none; box-shadow: 0 22px 60px #0009; border: 1px solid #697267; }
 #block-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 #section-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+#section-connections { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.section-connection-line { fill: none; stroke: #f3cf72; stroke-width: 3; stroke-dasharray: 2 5; stroke-linecap: round; vector-effect: non-scaling-stroke; opacity: .95; }
+.section-connection-endpoint { fill: #17211e; stroke: #fff0a6; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.section-connection-label { fill: #fff0a6; stroke: #17211e; stroke-width: 3px; paint-order: stroke; font: 12px 'DM Mono', monospace; vector-effect: non-scaling-stroke; }
 #section-label-layer { position: absolute; inset: 0; pointer-events: none; }
 .section-label { position: absolute; z-index: 1; width: auto; min-width: 34px; height: 26px; padding: 2px 7px; transform: translate(-50%,-50%); color: #f0e9ce; background: #17211ee8; border: 1px solid #c7a969; border-radius: 4px; box-shadow: 0 2px 8px #000b; font: 10px 'DM Mono', monospace; white-space: nowrap; pointer-events: auto; touch-action: none; }
 .section-label.selected { outline: 2px solid #e5cb7c; outline-offset: 2px; }

@@ -55,6 +55,16 @@ export function openProject(path) {
     CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, floor_id TEXT NOT NULL REFERENCES floors(id), name TEXT NOT NULL, bounds_json TEXT NOT NULL, placement_x INTEGER NOT NULL DEFAULT 0, placement_z INTEGER NOT NULL DEFAULT 0, label_x REAL NOT NULL DEFAULT 0, label_z REAL NOT NULL DEFAULT 0, provenance_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_chunks (section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE, chunk_x INTEGER NOT NULL, chunk_y INTEGER NOT NULL, chunk_z INTEGER NOT NULL, format_version INTEGER NOT NULL, blob BLOB NOT NULL, PRIMARY KEY(section_id, chunk_x, chunk_y, chunk_z));
     CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id));
+    CREATE TABLE IF NOT EXISTS section_connections (id TEXT PRIMARY KEY, section_a_id TEXT NOT NULL REFERENCES sections(id), x_a REAL NOT NULL, z_a REAL NOT NULL, section_b_id TEXT NOT NULL REFERENCES sections(id), x_b REAL NOT NULL, z_b REAL NOT NULL, label TEXT NOT NULL DEFAULT '', CHECK(section_a_id <> section_b_id));
+    CREATE TRIGGER IF NOT EXISTS section_connection_same_floor_insert BEFORE INSERT ON section_connections
+      WHEN (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_b_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) <> (SELECT floor_id FROM sections WHERE id=NEW.section_b_id)
+      BEGIN SELECT RAISE(ABORT, 'Section connections must join sections on the same floor.'); END;
+    CREATE TRIGGER IF NOT EXISTS section_connection_same_floor_update BEFORE UPDATE OF section_a_id,section_b_id ON section_connections
+      WHEN (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_b_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) <> (SELECT floor_id FROM sections WHERE id=NEW.section_b_id)
+      BEGIN SELECT RAISE(ABORT, 'Section connections must join sections on the same floor.'); END;
+    CREATE TRIGGER IF NOT EXISTS section_connection_floor_reassignment BEFORE UPDATE OF floor_id ON sections
+      WHEN EXISTS(SELECT 1 FROM section_connections c JOIN sections other ON other.id=CASE WHEN c.section_a_id=OLD.id THEN c.section_b_id ELSE c.section_a_id END WHERE (c.section_a_id=OLD.id OR c.section_b_id=OLD.id) AND other.floor_id<>NEW.floor_id)
+      BEGIN SELECT RAISE(ABORT, 'Remove section connections before moving this section to another floor.'); END;
   `);
   const sectionColumns = new Set(db.pragma('table_info(sections)').map(column => column.name));
   if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
@@ -146,6 +156,75 @@ export function restoreMarker(db, id, marker, expectedRevision) {
   return { revision: expectedRevision + 1 };
 }
 
+function validateConnection(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Connection data is required.');
+  if (typeof input.sectionAId !== 'string' || typeof input.sectionBId !== 'string' || input.sectionAId === input.sectionBId) throw new Error('Choose two different sections.');
+  if (![input.xA, input.zA, input.xB, input.zB].every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) throw new Error('Connection anchors must be finite local coordinates.');
+  if (input.label !== undefined && (typeof input.label !== 'string' || input.label.length > 120 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.label))) throw new Error('Connection label must be 120 plain-text characters or fewer.');
+}
+
+function validateConnectionSections(db, input) {
+  const sections = [input.sectionAId, input.sectionBId].map(id => db.prepare('SELECT id,floor_id,bounds_json FROM sections WHERE id=?').get(id));
+  if (sections.some(section => !section)) throw new Error('Choose existing owning sections.');
+  if (sections[0].floor_id !== sections[1].floor_id) throw new Error('Connected sections must be on the same floor.');
+  for (const [index, section] of sections.entries()) {
+    const x = index === 0 ? input.xA : input.xB, z = index === 0 ? input.zA : input.zB;
+    const bounds = JSON.parse(section.bounds_json);
+    if (x < 0 || z < 0 || x > bounds.x || z > bounds.z) throw new Error('Connection anchor must be inside its owning section bounds.');
+  }
+}
+
+export function readSectionConnection(db, id) {
+  return db.prepare('SELECT id,section_a_id AS sectionAId,x_a AS xA,z_a AS zA,section_b_id AS sectionBId,x_b AS xB,z_b AS zB,label FROM section_connections WHERE id=?').get(id) ?? null;
+}
+
+/** Save a visual-only connection using section-local anchors and a project revision. */
+export function saveSectionConnection(db, input, expectedRevision, id = null) {
+  validateConnection(input);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  validateConnectionSections(db, input);
+  const label = (input.label ?? '').trim();
+  const tx = db.transaction(() => {
+    if (id) {
+      const result = db.prepare('UPDATE section_connections SET section_a_id=?,x_a=?,z_a=?,section_b_id=?,x_b=?,z_b=?,label=? WHERE id=?').run(input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label, id);
+      if (!result.changes) throw new Error('Section connection does not exist.');
+    } else {
+      id = randomUUID();
+      db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label) VALUES(?,?,?,?,?,?,?,?)').run(id, input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label);
+    }
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { ...readSectionConnection(db, id), revision: expectedRevision + 1 };
+}
+
+export function deleteSectionConnection(db, id, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const tx = db.transaction(() => {
+    if (!db.prepare('DELETE FROM section_connections WHERE id=?').run(id).changes) throw new Error('Section connection does not exist.');
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { revision: expectedRevision + 1 };
+}
+
+export function restoreSectionConnection(db, id, connection, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const tx = db.transaction(() => {
+    if (connection === null) db.prepare('DELETE FROM section_connections WHERE id=?').run(id);
+    else {
+      validateConnection(connection);
+      validateConnectionSections(db, connection);
+      db.prepare(`INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET section_a_id=excluded.section_a_id,x_a=excluded.x_a,z_a=excluded.z_a,section_b_id=excluded.section_b_id,x_b=excluded.x_b,z_b=excluded.z_b,label=excluded.label`)
+        .run(id, connection.sectionAId, connection.xA, connection.zA, connection.sectionBId, connection.xB, connection.zB, connection.label ?? '');
+    }
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { revision: expectedRevision + 1 };
+}
+
 export function snapshotProject(db) {
   const revision = projectRevision(db);
   const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
@@ -175,7 +254,12 @@ export function snapshotProject(db) {
       z: sectionLocalToFloor({ placementX: marker.sectionX, placementZ: marker.sectionZ }, { x: marker.x, z: marker.z }, { x: minX, z: minZ }).z,
       localX: marker.x, localZ: marker.z, stairDestinationId: marker.stairDestinationId
     }));
-    return { ...floor, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers };
+    const connections = db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.x_a AS xA,c.z_a AS zA,c.section_b_id AS sectionBId,c.x_b AS xB,c.z_b AS zB,c.label,s1.placement_x AS ax,s1.placement_z AS az,s2.placement_x AS bx,s2.placement_z AS bz FROM section_connections c JOIN sections s1 ON s1.id=c.section_a_id JOIN sections s2 ON s2.id=c.section_b_id WHERE s1.floor_id=? ORDER BY c.id`).all(floor.id).map(connection => ({
+      id: connection.id, sectionAId: connection.sectionAId, xA: connection.xA, zA: connection.zA, sectionBId: connection.sectionBId, xB: connection.xB, zB: connection.zB, label: connection.label,
+      displayA: { x: connection.ax + connection.xA - minX, z: connection.az + connection.zA - minZ },
+      displayB: { x: connection.bx + connection.xB - minX, z: connection.bz + connection.zB - minZ }
+    }));
+    return { ...floor, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections };
   }) };
 }
 
