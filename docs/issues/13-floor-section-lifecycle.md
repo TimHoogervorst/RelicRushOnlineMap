@@ -1,6 +1,6 @@
 # 13 — Manage floors and sections without dangling references
 
-Status: blocked
+Status: in progress
 
 ## What to build
 
@@ -27,5 +27,9 @@ Follow the agreed spec and domain glossary. Shared constraints: one Docker app; 
 
 ## Handoff
 
-Record implemented behavior, tests run and results, contract changes, and remaining limitations here when completing the ticket.
+Implemented protected, revisioned API operations for floor/section rename and ordering, section ownership changes, dependency listing, and floor/section deletion. Section deletion returns marker/connection/stair dependents until the caller supplies an explicit marker delete/reassign choice and the complete connection deletion list; all relationship cleanup and row deletion run in one SQLite transaction. Stable IDs are retained on rename, reorder, and reassignment. Floor 0 and the starting section are protected. Section moves reject existing same-floor dotted links and stair links that would become same-floor. Floor removal either requires an empty floor or a destination floor and validates its section/stair/connection topology. Lifecycle controls are available in the authenticated editor. Metadata saves now carry floor name/order and section order into visitor manifests.
+
+Verification: `npm test` (57/57 passed); `npm run typecheck` passed. New tests cover stale revisions, both connection constraints, dependency reporting, failed reassignment rollback, built-in protection, authenticated API access, and visitor manifest refresh after rename.
+
+Remaining: lifecycle-specific undo/redo is not implemented yet. Restored legacy references are exposed in authenticated project metadata as `unresolvedRecords`; public snapshots omit records whose owner cannot be resolved so visitor navigation handles an absent stair destination as unmapped. Browser interaction and Docker acceptance remain open. Ticket stays in progress until undo/redo and the remaining acceptance checks are verified.
 

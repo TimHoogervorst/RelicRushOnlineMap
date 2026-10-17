@@ -104,10 +104,11 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           const floor = snapshot.floors.find(item => item.id === oldFloor.id);
           if (!floor) throw new Error('Metadata-only save cannot change the floor list.');
           await copyFile(path.join(previousDir, oldFloor.image), path.join(temporary, oldFloor.image));
-          floors.push({ ...oldFloor, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [] });
+          floors.push({ ...oldFloor, name: floor.name, sortOrder: floor.sortOrder, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [] });
         }
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
         progress('Writing metadata revision', 90);
+        floors.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
         const manifest = { ...previousManifest, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));

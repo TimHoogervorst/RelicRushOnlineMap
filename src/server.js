@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
 
@@ -135,9 +135,32 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/project/floors', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
-    try { res.json({ revision: projectRevision(db), floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all() }); }
+    try { const snapshot = snapshotProject(db); res.json({ revision: snapshot.revision, floors: db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order').all(), sections: db.prepare('SELECT id,floor_id AS floorId,name,sort_order AS sortOrder FROM sections ORDER BY floor_id,sort_order,id').all(), unresolvedRecords: snapshot.unresolvedRecords }); }
     finally { db.close(); }
   });
+  const lifecycleMutation = async (req, res, operation, geometry = false) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const result = operation(db);
+      try {
+        const saved = geometry ? await generation.save(snapshotProject(db)) : await generation.saveMetadata(snapshotProject(db));
+        return res.json({ ...result, saved: true, status: generation.queue.status });
+      } catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const body = { error: error.message }; if (error.dependents) body.dependents = error.dependents;
+      return res.status(/another editor tab|does not exist|connections|stairs|floor|section/i.test(error.message) ? 409 : 400).json(body);
+    } finally { db.close(); }
+  };
+  app.put('/api/project/floors/:id', requireEditor, requireSameOrigin, (req, res) => void lifecycleMutation(req,res,db => renameFloor(db,req.params.id,req.body?.name,req.body?.expectedRevision)));
+  app.put('/api/project/floors/:id/order', requireEditor, requireSameOrigin, (req, res) => void lifecycleMutation(req,res,db => reorderFloor(db,req.params.id,req.body?.sortOrder,req.body?.expectedRevision)));
+  app.delete('/api/project/floors/:id', requireEditor, requireSameOrigin, (req, res) => void lifecycleMutation(req,res,db => deleteFloorLifecycle(db,req.params.id,req.body?.resolution,req.body?.expectedRevision),true));
+  app.get('/api/project/sections/:id/dependents', requireEditor, (_req,res) => {
+    const db = openProject(path.join(dataDir,'project.sqlite')); try { res.json({ dependents: sectionDependents(db,_req.params.id) }); } finally { db.close(); }
+  });
+  app.put('/api/project/sections/:id/name', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => renameSection(db,req.params.id,req.body?.name,req.body?.expectedRevision)));
+  app.put('/api/project/sections/:id/order', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => reorderSection(db,req.params.id,req.body?.sortOrder,req.body?.expectedRevision)));
+  app.put('/api/project/sections/:id/floor', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => moveSectionToFloor(db,req.params.id,req.body?.floorId,req.body?.expectedRevision),true));
+  app.delete('/api/project/sections/:id', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => deleteSectionLifecycle(db,req.params.id,req.body?.resolution,req.body?.expectedRevision),true));
   app.get('/api/project/stairs', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {
