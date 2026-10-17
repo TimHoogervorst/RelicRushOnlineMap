@@ -7,6 +7,8 @@ import path from 'node:path';
 import { Buffer } from 'node:buffer';
 import { createServer } from 'node:http';
 import { createApp } from '../src/server.js';
+import { openProject, snapshotProject } from '../src/project-store.js';
+import { createProjectBackup } from '../src/backup-service.js';
 
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-auth-'));
@@ -55,6 +57,22 @@ test('login issues an expiring HttpOnly SameSite cookie and protects editor reso
   assert.equal((await fetch(`${origin}/api/editor/project`, { headers: { cookie: cookie.split(';')[0] } })).status, 401);
 });
 
+test('authenticated owner downloads and restores a project backup; anonymous callers cannot access it', async t => {
+  const { origin, dataDir } = await fixture(t);
+  const db = openProject(path.join(dataDir, 'project.sqlite')); db.prepare("INSERT INTO floors(id,name,sort_order) VALUES('floor-x','Original',0)").run(); db.close();
+  const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  assert.equal((await fetch(`${origin}/api/backups/export`)).status, 401);
+  const downloaded = await fetch(`${origin}/api/backups/export`, { headers: { cookie } }); assert.equal(downloaded.status, 200);
+  const archive = Buffer.from(await downloaded.arrayBuffer());
+  assert.equal((await fetch(`${origin}/api/backups/restore`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/zip', 'x-confirm-restore': 'RESTORE PROJECT' }, body: 'not a zip' })).status, 400);
+  const changed = openProject(path.join(dataDir, 'project.sqlite')); changed.prepare("UPDATE floors SET name='Changed' WHERE id='floor-x'").run(); changed.close();
+  const restored = await fetch(`${origin}/api/backups/restore`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/zip', 'x-confirm-restore': 'RESTORE PROJECT' }, body: archive });
+  assert.equal(restored.status, 200, (await restored.clone().json()).error);
+  const result = openProject(path.join(dataDir, 'project.sqlite')); assert.equal(snapshotProject(result).floors[0].name, 'Original'); result.close();
+  assert.equal((await fetch(`${origin}/api/backups/recovery`, { headers: { cookie } })).status, 200);
+});
+
 test('session expiration and Secure cookie configuration are enforced', async t => {
   const { origin } = await fixture(t, { sessionDurationMs: 1000, secureCookies: true });
   const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
@@ -76,9 +94,10 @@ test('login throttles repeated failures and does not accept cross-origin mutatio
 test('asset upload requires authentication and origin validation', async t => {
   const { origin } = await fixture(t);
   assert.equal((await fetch(`${origin}/api/assets/upload`, { method: 'POST', body: 'not a jar' })).status, 401);
-  for (const url of ['/api/project/state', '/api/backups/latest', '/api/generation/start', '/api/setup/status']) {
+  for (const url of ['/api/project/state', '/api/backups/latest', '/api/backups/export', '/api/backups/recovery', '/api/generation/start', '/api/setup/status']) {
     assert.equal((await fetch(`${origin}${url}`)).status, 401, `${url} must stay private`);
   }
+  assert.equal((await fetch(`${origin}/api/backups/restore`, { method: 'POST', body: 'invalid' })).status, 401, 'restore must stay private');
   const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
   const cookie = login.headers.get('set-cookie').split(';')[0];
   const csrf = await fetch(`${origin}/api/editor/save`, { method: 'POST', headers: { cookie, origin: 'https://attacker.invalid' } });

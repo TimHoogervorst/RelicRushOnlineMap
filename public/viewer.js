@@ -854,8 +854,18 @@ async function refreshSession() {
     for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
     document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
     await refreshSaveStatus();
+    await refreshRecoverySnapshots();
     if (visibleHeight < 256 && floorManifest) updateSlicePreview();
   } else { slicePreviewActive = false; selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); }
+}
+
+async function refreshRecoverySnapshots() {
+  const list = document.querySelector('#backup-recovery-list'); if (!list) return;
+  const response = await fetch('/api/backups/recovery', { cache: 'no-store' });
+  if (!response.ok) { list.textContent = 'Recovery snapshots could not be listed.'; return; }
+  const { snapshots } = await response.json(); list.replaceChildren();
+  if (!snapshots.length) { list.textContent = 'No recovery snapshots yet.'; return; }
+  for (const name of snapshots) { const item = document.createElement('li'), link = document.createElement('a'); link.href = `/api/backups/recovery/${encodeURIComponent(name)}`; link.textContent = name; link.download = name; item.append(link); list.append(item); }
 }
 
 async function lifecycleRequest(url, method, payload) {
@@ -937,6 +947,31 @@ document.querySelector('#upload-resource-pack').addEventListener('click', async 
   status.textContent = response.ok ? `Resource pack ${result.resourcePack.description || '(unnamed)'} (format ${result.resourcePack.packFormat}) saved (${result.resourcePack.sha256.slice(0, 12)}…). ${result.saved ? 'Map regenerated.' : result.warning}` : result.error;
   if (result.status) setSaveStatus(result.status);
   if (response.ok && result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+});
+document.querySelector('#backup-download').addEventListener('click', async () => {
+  const status = document.querySelector('#backup-status'); status.textContent = 'Preparing consistent SQLite and asset snapshot…';
+  try {
+    const response = await fetch('/api/backups/export', { cache: 'no-store' });
+    if (!response.ok) { status.textContent = (await response.json()).error; return; }
+    status.textContent = 'Packaging project files…';
+    const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = 'rr-map-project.zip'; link.click(); URL.revokeObjectURL(url); status.textContent = 'Project backup downloaded.';
+  } catch (error) { status.textContent = `Backup failed: ${error.message}`; }
+});
+document.querySelector('#backup-refresh').addEventListener('click', () => { document.querySelector('#backup-status').textContent = 'Recovery snapshots refreshed.'; void refreshRecoverySnapshots(); });
+document.querySelector('#backup-restore').addEventListener('click', async () => {
+  const file = document.querySelector('#backup-zip').files[0], status = document.querySelector('#backup-status');
+  if (!file) { status.textContent = 'Choose a project backup ZIP first.'; return; }
+  const confirmation = window.prompt('This replaces the complete current project. Type RESTORE PROJECT to continue:');
+  if (confirmation !== 'RESTORE PROJECT') { status.textContent = 'Restore cancelled; current project is unchanged.'; return; }
+  status.textContent = 'Uploading and validating archive paths, checksums, SQLite schema and references…';
+  const button = document.querySelector('#backup-restore'); button.disabled = true;
+  try {
+    const response = await fetch('/api/backups/restore', { method: 'POST', headers: { 'content-type': 'application/zip', 'x-confirm-restore': confirmation }, body: file });
+    const result = await response.json();
+    status.textContent = response.ok ? result.message : `Restore failed: ${result.error}`;
+    if (response.ok) { await refreshPublicManifest(); await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshRecoverySnapshots(); }
+  } catch (error) { status.textContent = `Restore failed: ${error.message}. The server preserves the previous project on validation or restore errors.`; }
+  finally { button.disabled = false; }
 });
 document.querySelector('#import-floor').addEventListener('change', event => { document.querySelector('#import-floor-name').disabled = Boolean(event.target.value); });
 document.querySelector('#import-schematic').addEventListener('click', async () => {
