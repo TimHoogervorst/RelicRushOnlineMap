@@ -47,6 +47,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
   if (outWidth * outHeight > pixelLimit) throw new Error(`Map image ${outWidth}×${outHeight} exceeds the ${pixelLimit.toLocaleString('en-US')} pixel safety limit (about 64 MiB for raster buffers).`);
   const raw = Buffer.alloc(outWidth * outHeight * 4, 0);
   const zBuffer = new Float32Array(outWidth * outHeight).fill(-Infinity);
+  const surfaceBuffer = new Float32Array(outWidth * outHeight).fill(-Infinity);
   const modelCache = new Map(), textureCache = new Map(), stateModelCache = new Map();
   const diagnostics = new Set();
   const specialFallbacks = new Set();
@@ -143,6 +144,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
         const dest = at * 4;
         raw[dest] = color[0]; raw[dest + 1] = color[1]; raw[dest + 2] = color[2]; raw[dest + 3] = 255;
         zBuffer[at] = block.y + 1;
+        surfaceBuffer[at] = Math.max(surfaceBuffer[at], block.y + 1);
       }
       continue;
     }
@@ -158,7 +160,6 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
       const endX = Math.min(outWidth, Math.ceil((block.x + maxX) * pixelSize));
       const startY = Math.max(0, Math.floor((depth - block.z - maxZ) * pixelSize));
       const endY = Math.min(outHeight, Math.ceil((depth - block.z - minZ) * pixelSize));
-      const shade = Math.max(.65, 1 - (highY - y) * heightShadePerBlock);
       for (let py = startY; py < endY; py++) for (let px = startX; px < endX; px++) {
         const worldX = px / pixelSize - block.x;
         const worldZ = depth - (py + .5) / pixelSize - block.z;
@@ -170,15 +171,39 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
         const sample = (tz * pixels.width + tx) * 4, at = py * outWidth + px;
         const alpha = tint ? Math.min(pixels.data[sample + 3], 170) : pixels.data[sample + 3];
         if (!alpha || y < zBuffer[at]) continue;
+        if (y >= surfaceBuffer[at]) surfaceBuffer[at] = y;
         const dest = at * 4;
         const mix = alpha / 255;
-        raw[dest] = Math.round(pixels.data[sample] * (tint?.[0] ?? 255) / 255 * shade * mix + raw[dest] * (1 - mix));
-        raw[dest + 1] = Math.round(pixels.data[sample + 1] * (tint?.[1] ?? 255) / 255 * shade * mix + raw[dest + 1] * (1 - mix));
-        raw[dest + 2] = Math.round(pixels.data[sample + 2] * (tint?.[2] ?? 255) / 255 * shade * mix + raw[dest + 2] * (1 - mix));
+        raw[dest] = Math.round(pixels.data[sample] * (tint?.[0] ?? 255) / 255 * mix + raw[dest] * (1 - mix));
+        raw[dest + 1] = Math.round(pixels.data[sample + 1] * (tint?.[1] ?? 255) / 255 * mix + raw[dest + 1] * (1 - mix));
+        raw[dest + 2] = Math.round(pixels.data[sample + 2] * (tint?.[2] ?? 255) / 255 * mix + raw[dest + 2] * (1 - mix));
         raw[dest + 3] = Math.max(raw[dest + 3], alpha);
         if (alpha > 248) zBuffer[at] = y;
       }
     }
+  }
+  const heightGrid = Array.from({ length: depth }, () => Array(width).fill(null));
+  for (let py = 0; py < outHeight; py++) for (let px = 0; px < outWidth; px++) {
+    const surface = surfaceBuffer[py * outWidth + px];
+    if (!Number.isFinite(surface)) continue;
+    const x = Math.floor(px / pixelSize), z = depth - 1 - Math.floor(py / pixelSize);
+    heightGrid[z][x] = Math.max(heightGrid[z][x] ?? -Infinity, surface);
+  }
+  const neighborhood = (x, z) => [[x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]]
+    .filter(([nx, nz]) => nx >= 0 && nx < width && nz >= 0 && nz < depth && heightGrid[nz][nx] !== null)
+    .map(([nx, nz]) => heightGrid[nz][nx]);
+  for (let py = 0; py < outHeight; py++) for (let px = 0; px < outWidth; px++) {
+    const at = py * outWidth + px, dest = at * 4;
+    if (!raw[dest + 3]) continue;
+    const x = Math.floor(px / pixelSize), z = depth - 1 - Math.floor(py / pixelSize), height = heightGrid[z][x];
+    if (height === null) continue;
+    const adjacent = neighborhood(x, z);
+    const localDelta = adjacent.length ? height - adjacent.reduce((sum, value) => sum + value, 0) / adjacent.length : 0;
+    let shade = Math.max(.94, Math.min(1.06, 1 + localDelta * heightShadePerBlock));
+    const edge = neighborhood(x, z).some(value => Math.abs(value - height) >= 1) &&
+      (px % pixelSize === 0 || px % pixelSize === pixelSize - 1 || py % pixelSize === 0 || py % pixelSize === pixelSize - 1);
+    if (edge) shade *= .96;
+    raw[dest] = Math.round(raw[dest] * shade); raw[dest + 1] = Math.round(raw[dest + 1] * shade); raw[dest + 2] = Math.round(raw[dest + 2] * shade);
   }
   await sharp(raw, { raw: { width: outWidth, height: outHeight, channels: 4 } }).png().toFile(output);
   const highestBlockY = Number.isFinite(highY) ? Math.floor(highY) : 0;
@@ -186,7 +211,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
   return {
     image: path.basename(output), width: outWidth, height: outHeight,
     bounds: { x: 0, y: 0, z: 0, width, height, depth }, projection: 'orthographic-xz',
-    highestBlockY, lowestBlockY,
+    highestBlockY, lowestBlockY, heightGrid: { width, depth, values: heightGrid },
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),

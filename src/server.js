@@ -132,6 +132,20 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       res.set('Cache-Control', `public, max-age=31536000, immutable`).type('png').send(await readFile(path.join(dataDir, 'releases', directory, imageName)));
     } catch { res.status(503).type('text').send('The public map is not available until matching Minecraft assets are configured.'); }
   });
+  app.get('/api/map/height-grid', async (_req, res) => {
+    if (restoreBusy) return res.status(503).type('text').send('The map is being restored. Refresh after the restore completes.');
+    try {
+      const revision = String(_req.query.revision ?? '');
+      if (!/^[0-9]+$/.test(revision)) throw new Error('Invalid release revision');
+      const directory = `revision-${revision}`;
+      const manifest = JSON.parse(await readFile(path.join(dataDir, 'releases', directory, 'manifest.json'), 'utf8'));
+      if (manifest.projectRevision !== Number(revision)) throw new Error('Invalid release revision');
+      const floor = manifest.floors?.find(item => item.id === _req.query.floor);
+      const grid = floor?.heightGrid;
+      if (!grid || grid.projectRevision !== Number(revision) || path.basename(grid.path) !== grid.path) throw new Error('Invalid height grid reference');
+      res.set('Cache-Control', 'public, max-age=31536000, immutable').type('application/json').send(await readFile(path.join(dataDir, 'releases', directory, grid.path)));
+    } catch { res.status(503).type('text').send('The map height grid is not available for this revision.'); }
+  });
   app.get('/api/status', (_req, res) => res.json({ initialized: workerState.ready, mapAvailable: Boolean(workerState.rendered), warning: workerState.warning ?? null }));
   app.get('/api/backups/export', requireEditor, async (_req, res) => {
     if (backupBusy || restoreBusy) return res.status(409).json({ error: 'Another backup or restore is already in progress.' });

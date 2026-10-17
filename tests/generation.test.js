@@ -21,6 +21,11 @@ test('publishes image, manifest, and project snapshot through one revision point
     const savedSnapshot = JSON.parse(await readFile(path.join(dataDir, 'releases', pointer.directory, 'project.json'), 'utf8'));
     assert.equal(savedSnapshot.revision, manifest.projectRevision);
     assert.deepEqual(await readFile(path.join(dataDir, 'releases', pointer.directory, manifest.image)), png);
+    assert.equal(manifest.heightGrid.path, 'f1-height-grid.json');
+    assert.equal(manifest.heightGrid.projectRevision, 4);
+    const grid = JSON.parse(await readFile(path.join(dataDir, 'releases', pointer.directory, manifest.heightGrid.path), 'utf8'));
+    assert.equal(grid.projectRevision, 4);
+    assert.deepEqual(grid.values, [[null]]);
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
 
@@ -71,5 +76,6 @@ test('metadata-only release advances the public manifest without rerendering flo
     assert.equal(manifest.projectRevision, 2);
     assert.equal(manifest.markers[0].x, 61.5);
     assert.deepEqual(await readFile(path.join(dataDir, 'releases', 'revision-2', 'f1.png')), firstImage);
+    assert.deepEqual(JSON.parse(await readFile(path.join(dataDir, 'releases', 'revision-2', manifest.heightGrid.path), 'utf8')).projectRevision, 1, 'reused geometry height data stays associated with its geometry revision');
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });

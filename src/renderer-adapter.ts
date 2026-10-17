@@ -26,6 +26,7 @@ export interface OrthographicRenderManifest {
   projection: 'orthographic-xz';
   highestBlockY: number;
   lowestBlockY: number;
+  heightGrid: { width: number; depth: number; values: Array<Array<number | null>> };
   materials: string[];
   unsupportedBlocks: string[];
   specialBlockFallbacks: string[];

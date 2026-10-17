@@ -61,7 +61,13 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
             throw new Error(`Renderer produced invalid PNG output for floor ${floor.name}.`);
           }
-          floors.push({ id: floor.id, name: floor.name, image: output, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [], ...rendered });
+          const heightGridPath = `${floor.id}-height-grid.json`;
+          const heightGrid = rendered.heightGrid ?? { width: floor.dimensions.x, depth: floor.dimensions.z, values: Array.from({ length: floor.dimensions.z }, () => Array(floor.dimensions.x).fill(null)) };
+          if (heightGrid.width !== floor.dimensions.x || heightGrid.depth !== floor.dimensions.z || !Array.isArray(heightGrid.values) || heightGrid.values.length !== heightGrid.depth || heightGrid.values.some(row => !Array.isArray(row) || row.length !== heightGrid.width || row.some(value => value !== null && (typeof value !== 'number' || !Number.isFinite(value))))) {
+            throw new Error(`Renderer produced an invalid height grid for floor ${floor.name}.`);
+          }
+          await writeFile(path.join(temporary, heightGridPath), JSON.stringify({ format: 'rr-map-surface-height-grid', version: 1, projectRevision: snapshot.revision, floorId: floor.id, coordinateOrigin: floor.coordinateOrigin, xAxis: 'east', zAxis: 'south', rowOrder: 'z-ascending', values: heightGrid.values }));
+          floors.push({ id: floor.id, name: floor.name, image: output, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision }, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [], ...rendered, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision } });
         }
         progress('Writing revision snapshot', 90);
         let resourcePack = null;
@@ -104,6 +110,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           const floor = snapshot.floors.find(item => item.id === oldFloor.id);
           if (!floor) throw new Error('Metadata-only save cannot change the floor list.');
           await copyFile(path.join(previousDir, oldFloor.image), path.join(temporary, oldFloor.image));
+          if (oldFloor.heightGrid?.path) await copyFile(path.join(previousDir, oldFloor.heightGrid.path), path.join(temporary, oldFloor.heightGrid.path));
           floors.push({ ...oldFloor, name: floor.name, sortOrder: floor.sortOrder, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [] });
         }
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
