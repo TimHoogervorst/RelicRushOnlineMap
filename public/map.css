@@ -1,0 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap');
+:root { color-scheme: dark; font-family: Manrope, system-ui, sans-serif; color: #e8e5dc; background: #101414; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; height: 100vh; overflow: hidden; }
+.toolbar { height: 68px; display: flex; align-items: center; gap: 30px; padding: 0 24px; background: #171d1b; border-bottom: 1px solid #2d3530; box-shadow: 0 4px 20px #0005; position: relative; z-index: 2; }
+.brand { display: flex; align-items: center; gap: 11px; margin-right: auto; letter-spacing: -.02em; }
+.brand strong, .brand small { display: block; }
+.brand strong { font-size: 14px; font-weight: 700; }
+.brand small { color: #929c91; font-size: 10px; margin-top: 2px; }
+.mark { width: 35px; height: 35px; border-radius: 9px; color: #132019; background: #a8c58f; display: grid; place-items: center; font: 500 11px 'DM Mono', monospace; }
+.floor-picker { font: 11px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .11em; color: #a6afa5; }
+select, button { color: #e5e7df; background: #202825; border: 1px solid #37413b; border-radius: 6px; font: inherit; }
+select { margin-left: 8px; padding: 8px 25px 8px 10px; font: 12px Manrope, sans-serif; text-transform: none; letter-spacing: 0; }
+.actions { display: flex; gap: 7px; }
+button { min-width: 34px; height: 34px; padding: 0 11px; cursor: pointer; font: 12px 'DM Mono', monospace; transition: background .16s ease, border-color .16s ease; }
+button:hover { background: #2c3730; border-color: #657860; }
+button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline-offset: 2px; }
+#viewport { position: relative; width: 100%; height: calc(100vh - 68px); overflow: hidden; background-color: #101513; background-image: radial-gradient(#28312c 1px, transparent 1px); background-size: 22px 22px; touch-action: none; }
+#map-frame { position: absolute; left: 50%; top: 50%; transform-origin: center; will-change: transform; cursor: grab; }
+#map-frame.dragging { cursor: grabbing; }
+#map { display: block; image-rendering: pixelated; max-width: none; box-shadow: 0 22px 60px #0009; border: 1px solid #697267; }
+#message { position: absolute; inset: 0; display: grid; place-items: center; margin: auto; color: #b4bcae; font-size: 13px; text-align: center; padding: 30px; pointer-events: none; }
+#message[hidden] { display: none; }
+.map-caption { position: absolute; left: 19px; bottom: 17px; padding: 9px 12px; border-radius: 5px; background: #171d1bdb; border: 1px solid #303a34; color: #b5c1ac; font: 10px 'DM Mono', monospace; letter-spacing: .06em; }
+@media (max-width: 600px) { .toolbar { height: 58px; gap: 10px; padding: 0 12px; } .brand strong { font-size: 12px; } .brand small, .floor-picker { display: none; } #viewport { height: calc(100vh - 58px); } .actions { gap: 5px; } button { height: 32px; } }
