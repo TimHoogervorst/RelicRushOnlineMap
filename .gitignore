@@ -8,3 +8,4 @@ uploads/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+assets/minecraft-client.jar

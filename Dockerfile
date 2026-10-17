@@ -16,6 +16,7 @@ RUN npm ci
 COPY src ./src
 COPY public ./public
 COPY schematics ./schematics
+COPY tsconfig.json ./tsconfig.json
 RUN npm run typecheck && npm test
 
 FROM node:22.15.0-bookworm-slim AS runtime
