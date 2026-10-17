@@ -85,7 +85,7 @@ function validateMarker(input) {
 }
 
 /** Save a marker mutation atomically with the caller's expected project revision. */
-export function saveMarker(db, input, expectedRevision, id = null, { preserveDisplayedPosition = false } = {}) {
+export function saveMarker(db, input, expectedRevision, id = null, { preserveDisplayedPosition = false, confirmUnlink = false } = {}) {
   validateMarker(input);
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
   const target = db.prepare('SELECT id,floor_id,placement_x,placement_z FROM sections WHERE id=?').get(input.sectionId);
@@ -100,6 +100,13 @@ export function saveMarker(db, input, expectedRevision, id = null, { preserveDis
   }
   const tx = db.transaction(() => {
     if (id) {
+      const current = db.prepare('SELECT m.type,m.stair_destination_id,s.floor_id FROM markers m JOIN sections s ON s.id=m.section_id WHERE m.id=?').get(id);
+      if (!current) throw new Error('Marker does not exist.');
+      if (current.stair_destination_id && target.floor_id !== current.floor_id) throw new Error('A linked stair cannot change floors. Unlink it first.');
+      if (current.stair_destination_id && input.type !== 'stairs' && !confirmUnlink) throw new Error('Confirm removing this stair connection before changing its type.');
+      if (current.stair_destination_id && input.type !== 'stairs') {
+        db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id IN (?,?)').run(id, current.stair_destination_id);
+      }
       const result = db.prepare('UPDATE markers SET section_id=?,type=?,name=?,description=?,x=?,z=? WHERE id=?').run(input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z, id);
       if (result.changes !== 1) throw new Error('Marker does not exist.');
     } else {
@@ -112,11 +119,46 @@ export function saveMarker(db, input, expectedRevision, id = null, { preserveDis
   return { id, sectionId: input.sectionId, type: input.type, name: input.name.trim(), description: input.description ?? '', x, z, revision: expectedRevision + 1 };
 }
 
-export function deleteMarker(db, id, expectedRevision) {
+export function deleteMarker(db, id, expectedRevision, { confirmUnlink = false } = {}) {
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
   const tx = db.transaction(() => {
+    const marker = db.prepare('SELECT stair_destination_id FROM markers WHERE id=?').get(id);
+    if (!marker) throw new Error('Marker does not exist.');
+    if (marker.stair_destination_id && !confirmUnlink) throw new Error('Confirm removing this stair connection before deleting the marker.');
+    if (marker.stair_destination_id) db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id=?').run(marker.stair_destination_id);
     const result = db.prepare('DELETE FROM markers WHERE id=?').run(id);
     if (result.changes !== 1) throw new Error('Marker does not exist.');
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { revision: expectedRevision + 1 };
+}
+
+/** Create a reciprocal cross-floor stair link with a single revisioned transaction. */
+export function linkStairs(db, firstId, secondId, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (typeof firstId !== 'string' || typeof secondId !== 'string' || firstId === secondId) throw new Error('Choose two distinct stairs.');
+  const tx = db.transaction(() => {
+    const find = db.prepare('SELECT m.id,m.type,m.stair_destination_id,s.floor_id FROM markers m JOIN sections s ON s.id=m.section_id WHERE m.id=?');
+    const first = find.get(firstId), second = find.get(secondId);
+    if (!first || !second) throw new Error('Both stair markers must exist.');
+    if (first.type !== 'stairs' || second.type !== 'stairs') throw new Error('Only stairs can be linked.');
+    if (first.floor_id === second.floor_id) throw new Error('Stairs must be on different floors.');
+    if ((first.stair_destination_id && first.stair_destination_id !== secondId) || (second.stair_destination_id && second.stair_destination_id !== firstId)) throw new Error('Each stair can belong to only one connection. Unlink its current destination first.');
+    db.prepare('UPDATE markers SET stair_destination_id=? WHERE id=?').run(secondId, firstId);
+    db.prepare('UPDATE markers SET stair_destination_id=? WHERE id=?').run(firstId, secondId);
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx();
+  return { firstId, secondId, revision: expectedRevision + 1 };
+}
+
+export function unlinkStair(db, id, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const tx = db.transaction(() => {
+    const marker = db.prepare('SELECT stair_destination_id FROM markers WHERE id=? AND type=\'stairs\'').get(id);
+    if (!marker) throw new Error('Stair marker does not exist.');
+    if (marker.stair_destination_id) db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id IN (?,?)').run(id, marker.stair_destination_id);
     advanceProjectRevision(db, expectedRevision);
   });
   tx();
@@ -132,13 +174,25 @@ export function readMarker(db, id) {
 export function restoreMarker(db, id, marker, expectedRevision) {
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
   const tx = db.transaction(() => {
-    if (marker === null) db.prepare('DELETE FROM markers WHERE id=?').run(id);
+    const current = db.prepare('SELECT stair_destination_id FROM markers WHERE id=?').get(id);
+    if (current?.stair_destination_id) db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id=?').run(current.stair_destination_id);
+    if (marker === null) {
+      db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id=?').run(id);
+      db.prepare('DELETE FROM markers WHERE id=?').run(id);
+    }
     else {
       validateMarker(marker);
-      if (!db.prepare('SELECT 1 FROM sections WHERE id=?').get(marker.sectionId)) throw new Error('The marker section no longer exists.');
+      const owner = db.prepare('SELECT floor_id FROM sections WHERE id=?').get(marker.sectionId);
+      if (!owner) throw new Error('The marker section no longer exists.');
+      if (marker.stairDestinationId) {
+        if (marker.type !== 'stairs') throw new Error('Only stairs can have a destination.');
+        const partner = db.prepare('SELECT m.type,m.stair_destination_id,s.floor_id FROM markers m JOIN sections s ON s.id=m.section_id WHERE m.id=?').get(marker.stairDestinationId);
+        if (!partner || partner.type !== 'stairs' || partner.floor_id === owner.floor_id || (partner.stair_destination_id && partner.stair_destination_id !== id)) throw new Error('The stair destination is no longer available.');
+      }
       db.prepare(`INSERT INTO markers(id,section_id,type,name,description,x,z,stair_destination_id) VALUES(?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET section_id=excluded.section_id,type=excluded.type,name=excluded.name,description=excluded.description,x=excluded.x,z=excluded.z,stair_destination_id=excluded.stair_destination_id`)
         .run(id, marker.sectionId, marker.type, marker.name, marker.description ?? '', marker.x, marker.z, marker.stairDestinationId ?? null);
+      if (marker.stairDestinationId) db.prepare('UPDATE markers SET stair_destination_id=? WHERE id=?').run(id, marker.stairDestinationId);
     }
     advanceProjectRevision(db, expectedRevision);
   });

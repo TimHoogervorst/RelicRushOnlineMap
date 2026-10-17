@@ -37,9 +37,9 @@ viewport.addEventListener('pointerdown', event => { if (event.target.closest('.m
 viewport.addEventListener('pointermove', event => { if (!pointer || pointer.id !== event.pointerId) return; if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 4) pointer.moved = true; offsetX += event.clientX - pointer.x; offsetY += event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; drawTransform(); });
 function endPointer(event) { if (pointer?.id === event.pointerId) { const click = !pointer.moved, target = pointer.target, shiftKey = pointer.shiftKey; pointer = null; frame.classList.remove('dragging'); if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY, shiftKey); } }
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
-image.addEventListener('load', () => { if (!slicePreviewActive) fitFloor(); renderSelection(); });
+image.addEventListener('load', () => { if (!slicePreviewActive) fitFloor(); if (pendingCenterMarker) { const target = pendingCenterMarker; pendingCenterMarker = null; centerMarker(target); } renderSelection(); });
 
-let editorOpen = false, editorAuthenticated = false, sidebarOpen = true, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null;
+let editorOpen = false, editorAuthenticated = false, sidebarOpen = true, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null, pendingCenterMarker = null;
 let initialMarkerSection = null, initialMarkerDisplay = null;
 let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
 let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
@@ -233,7 +233,7 @@ document.querySelector('#floor').addEventListener('change', event => loadFloor(e
 function renderSidebar() {
   sidebar.hidden = !sidebarOpen;
   document.querySelector('#sidebar-reopen').hidden = sidebarOpen;
-  legendPanel.hidden = editorOpen;
+  legendPanel.hidden = false;
   editorPanel.hidden = !editorOpen;
   const modeButton = document.querySelector('#edit-mode');
   modeButton.textContent = editorOpen ? 'Done editing' : 'Edit';
@@ -380,13 +380,15 @@ function renderMarkers() {
     button.style.left = `${marker.x * pixels}px`; button.style.top = `${marker.z * pixels}px`;
     button.style.backgroundImage = `url("${markerIcon(marker.type)}")`;
     button.setAttribute('aria-label', `${markerTitles[marker.type] ?? marker.type}: ${marker.name}`);
-    button.hidden = !editorOpen && !readMarkerVisibility(floorManifest.id, marker.type);
+    button.hidden = !editorOpen && highlightedMarker !== marker.id && !readMarkerVisibility(floorManifest.id, marker.type);
     button.title = marker.name;
     button.classList.toggle('highlighted', highlightedMarker === marker.id);
     button.addEventListener('click', event => {
       event.stopPropagation();
       if (editorOpen) { populateMarkerForm(marker); return; }
-      highlightedMarker = marker.id; renderMarkers(); centerMarker(marker);
+      highlightedMarker = marker.id; renderMarkers();
+      if (marker.type === 'stairs') { void followStair(marker); return; }
+      centerMarker(marker);
       const popup = document.querySelector('#marker-popup');
       document.querySelector('#popup-name').textContent = marker.name;
       const note = marker.type === 'stairs' && !marker.stairDestinationId ? 'Destination not yet mapped.' : '';
@@ -439,7 +441,10 @@ function renderMarkers() {
       const entry = document.createElement('button'); entry.type = 'button'; entry.className = 'legend-entry';
       const icon = document.createElement('img'); icon.src = markerIcon(type); icon.alt = '';
       entry.append(icon, document.createTextNode(marker.name));
-      entry.addEventListener('click', () => { highlightedMarker = marker.id; renderMarkers(); centerMarker(marker); });
+      entry.addEventListener('click', () => {
+        if (editorOpen) { populateMarkerForm(marker); return; }
+        highlightedMarker = marker.id; renderMarkers(); centerMarker(marker);
+      });
       details.append(entry);
     }
     groups.append(details);
@@ -453,10 +458,42 @@ function storeMarkerVisibility(floorId, type, visible) {
   try { const key = `rr-marker-visibility:${floorId}`; const value = JSON.parse(localStorage.getItem(key) ?? '{}'); value[type] = visible; localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage may be disabled */ }
 }
 function centerMarker(marker) {
+  if (!image.naturalWidth) { pendingCenterMarker = marker; return; }
   const pixels = floorManifest.renderer?.pixelSize ?? 16;
-  offsetX = -(marker.x * pixels - image.naturalWidth / 2) * zoom;
-  offsetY = -(marker.z * pixels - image.naturalHeight / 2) * zoom;
+  const maxX = Math.max(0, image.naturalWidth * zoom / 2 - 36), maxY = Math.max(0, image.naturalHeight * zoom / 2 - 36);
+  offsetX = Math.max(-maxX, Math.min(maxX, -(marker.x * pixels - image.naturalWidth / 2) * zoom));
+  offsetY = Math.max(-maxY, Math.min(maxY, -(marker.z * pixels - image.naturalHeight / 2) * zoom));
   drawTransform();
+}
+async function refreshPublicManifest() {
+  const response = await fetch('/api/map/manifest', { cache: 'no-store' });
+  if (response.ok) publicMap = await response.json();
+}
+async function followStair(marker) {
+  if (!marker.stairDestinationId) { showMarkerPopup(marker, 'Destination not yet mapped.'); return; }
+  try {
+    await refreshPublicManifest();
+    const destinationFloor = publicMap?.floors?.find(floor => floor.markers?.some(item => item.id === marker.stairDestinationId));
+    const destination = destinationFloor?.markers?.find(item => item.id === marker.stairDestinationId);
+    if (!destination || destination.type !== 'stairs' || destination.stairDestinationId !== marker.id) {
+      showMarkerPopup(marker, 'Destination unavailable. Ask the map owner to relink these stairs.'); return;
+    }
+    highlightedMarker = destination.id;
+    if (destinationFloor.id !== floorManifest.id) {
+      document.querySelector('#floor').value = destinationFloor.id;
+      pendingCenterMarker = destination;
+      await loadFloor(destinationFloor.id);
+    } else {
+      renderMarkers(); centerMarker(destination);
+    }
+    document.querySelector('#marker-popup').hidden = true;
+  } catch (error) { showMarkerPopup(marker, `Destination unavailable. ${error.message}`); }
+}
+function showMarkerPopup(marker, note = '') {
+  const pixels = floorManifest.renderer?.pixelSize ?? 16, popup = document.querySelector('#marker-popup');
+  document.querySelector('#popup-name').textContent = marker.name;
+  document.querySelector('#popup-description').textContent = [marker.description, note].filter(Boolean).join('\n');
+  popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${marker.z * pixels + 14}px`; popup.hidden = false;
 }
 function populateMarkerForm(marker = null) {
   document.querySelector('#marker-id').value = marker?.id ?? '';
@@ -471,7 +508,48 @@ function populateMarkerForm(marker = null) {
   document.querySelector('#preserve-marker-position').checked = true;
   initialMarkerSection = marker?.sectionId ?? null;
   initialMarkerDisplay = marker ? { x: marker.x, z: marker.z } : null;
+  void refreshStairControls(marker);
 }
+async function refreshStairControls(marker = null) {
+  const box = document.querySelector('#stair-link-controls');
+  const isSavedStair = marker?.type === 'stairs' && Boolean(marker.id);
+  box.hidden = !editorAuthenticated || !isSavedStair;
+  if (!isSavedStair) return;
+  const response = await fetch('/api/project/stairs', { cache: 'no-store' });
+  if (!response.ok) { document.querySelector('#marker-status').textContent = 'Could not load stair destinations.'; return; }
+  const { stairs } = await response.json();
+  const candidates = stairs.filter(stair => stair.id !== marker.id && stair.floorId !== floorManifest.id);
+  const select = document.querySelector('#stair-destination');
+  select.replaceChildren(new Option(candidates.length ? 'Choose a destination' : 'No stairs on another floor', ''));
+  for (const stair of candidates) select.add(new Option(`${stair.floorName} · ${stair.name}`, stair.id));
+  if (marker.stairDestinationId && candidates.some(stair => stair.id === marker.stairDestinationId)) select.value = marker.stairDestinationId;
+  document.querySelector('#stair-link').hidden = Boolean(marker.stairDestinationId);
+  document.querySelector('#stair-unlink').hidden = !marker.stairDestinationId;
+}
+document.querySelector('#stair-link').addEventListener('click', async () => {
+  const firstId = document.querySelector('#marker-id').value, secondId = document.querySelector('#stair-destination').value;
+  if (!firstId || !secondId) { document.querySelector('#marker-status').textContent = 'Choose a stair destination on another floor.'; return; }
+  const response = await fetch('/api/project/stairs/link', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, firstId, secondId }) });
+  const result = await response.json();
+  if (!response.ok) { document.querySelector('#marker-status').textContent = result.error; return; }
+  projectRevision = result.revision;
+  if (!result.saved) { document.querySelector('#marker-status').textContent = `Stair link saved locally; ${result.warning}. Use Save to retry.`; return; }
+  document.querySelector('#marker-status').textContent = 'Stairs linked in both directions.';
+  await refreshPublicManifest(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus();
+  const current = floorManifest.markers.find(marker => marker.id === firstId); if (current) populateMarkerForm(current);
+});
+document.querySelector('#stair-unlink').addEventListener('click', async () => {
+  const id = document.querySelector('#marker-id').value;
+  if (!id || !window.confirm('Unlink both stairs? Their markers will remain.')) return;
+  const response = await fetch(`/api/project/stairs/${encodeURIComponent(id)}/link`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json();
+  if (!response.ok) { document.querySelector('#marker-status').textContent = result.error; return; }
+  projectRevision = result.revision;
+  if (!result.saved) { document.querySelector('#marker-status').textContent = `Stairs unlinked locally; ${result.warning}. Use Save to retry.`; return; }
+  await refreshPublicManifest(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus();
+  const current = floorManifest.markers.find(marker => marker.id === id); if (current) populateMarkerForm(current);
+  document.querySelector('#marker-status').textContent = 'Stairs unlinked.';
+});
 document.querySelector('#marker-section').addEventListener('change', event => {
   if (!initialMarkerSection || !initialMarkerDisplay || !document.querySelector('#preserve-marker-position').checked) return;
   const oldSection = floorManifest.sections.find(section => section.id === initialMarkerSection);
@@ -486,7 +564,10 @@ async function persistMarker(id = document.querySelector('#marker-id').value, pr
   status.textContent = 'Saving marker…';
   try {
     const keepDisplayedPosition = Boolean(id && marker.sectionId !== initialMarkerSection && document.querySelector('#preserve-marker-position').checked);
-    const response = await fetch(id ? `/api/project/markers/${encodeURIComponent(id)}` : '/api/project/markers', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, marker, preserveDisplayedPosition: preserveDisplayedPosition || keepDisplayedPosition }) });
+    const previous = id ? floorManifest.markers.find(item => item.id === id) : null;
+    const confirmUnlink = Boolean(previous?.stairDestinationId && marker.type !== 'stairs');
+    if (confirmUnlink && !window.confirm('Changing this stair type will unlink its partner. Continue?')) return false;
+    const response = await fetch(id ? `/api/project/markers/${encodeURIComponent(id)}` : '/api/project/markers', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, marker, preserveDisplayedPosition: preserveDisplayedPosition || keepDisplayedPosition, confirmUnlink }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error ?? 'Marker save failed.');
     projectRevision = result.marker?.revision ?? result.revision ?? projectRevision;
@@ -500,8 +581,9 @@ document.querySelector('#marker-form').addEventListener('submit', event => { eve
 document.querySelector('#marker-new').addEventListener('click', () => populateMarkerForm());
 document.querySelector('#marker-delete').addEventListener('click', async () => {
   const id = document.querySelector('#marker-id').value;
-  if (!id || !window.confirm('Delete this marker? This cannot be undone.')) return;
-  const response = await fetch(`/api/project/markers/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const marker = floorManifest.markers.find(item => item.id === id), linked = Boolean(marker?.stairDestinationId);
+  if (!id || !window.confirm(linked ? 'Delete this stair and unlink its partner? This cannot be undone.' : 'Delete this marker? This cannot be undone.')) return;
+  const response = await fetch(`/api/project/markers/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, confirmUnlink: linked }) });
   const result = await response.json();
   if (!response.ok) { document.querySelector('#marker-status').textContent = result.error; return; }
   projectRevision = result.revision; populateMarkerForm();
