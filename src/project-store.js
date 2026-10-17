@@ -81,6 +81,43 @@ export function projectRevision(db) {
   return Number.isSafeInteger(Number(value)) ? Number(value) : 0;
 }
 
+const LIFECYCLE_TABLES = ['floors','sections','markers','section_connections','section_chunks','section_render_settings'];
+
+/** Capture lifecycle-managed rows so a session command can reverse a compound delete or reassignment. */
+export function captureProjectLifecycleState(db) {
+  return Object.fromEntries(LIFECYCLE_TABLES.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
+}
+
+/** Restore one lifecycle snapshot atomically while advancing the shared project revision. */
+export function restoreProjectLifecycleState(db, state, expectedRevision) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (!state || LIFECYCLE_TABLES.some(table => !Array.isArray(state[table]))) throw new Error('Lifecycle history is invalid.');
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM section_connections').run();
+    db.prepare('DELETE FROM markers').run();
+    db.prepare('DELETE FROM section_render_settings').run();
+    db.prepare('DELETE FROM section_chunks').run();
+    db.prepare('DELETE FROM sections').run();
+    db.prepare('DELETE FROM floors').run();
+    const insertRows = table => {
+      for (const row of state[table]) {
+        const columns = Object.keys(row);
+        db.prepare(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`).run(...columns.map(column => row[column]));
+      }
+    };
+    insertRows('floors'); insertRows('sections'); insertRows('section_chunks'); insertRows('section_render_settings');
+    for (const marker of state.markers) {
+      const { stair_destination_id: _destination, ...row } = marker;
+      const columns = Object.keys(row);
+      db.prepare(`INSERT INTO markers(${columns.join(',')},stair_destination_id) VALUES(${columns.map(() => '?').join(',')},NULL)`).run(...columns.map(column => row[column]));
+    }
+    for (const marker of state.markers) if (marker.stair_destination_id) db.prepare('UPDATE markers SET stair_destination_id=? WHERE id=?').run(marker.stair_destination_id, marker.id);
+    insertRows('section_connections');
+    advanceProjectRevision(db, expectedRevision);
+  });
+  tx(); return { revision: expectedRevision + 1 };
+}
+
 const floorName = value => {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > 120 || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Name must contain 1–120 plain-text characters.');
   return value.trim();
@@ -193,13 +230,16 @@ export function deleteFloorLifecycle(db, id, resolution, expectedRevision) {
   const tx = db.transaction(() => {
     if (destination) {
       const set = new Set(sections);
+      const internalConnections = db.prepare('SELECT * FROM section_connections').all().filter(link => set.has(link.section_a_id) && set.has(link.section_b_id));
       for (const sectionId of sections) {
         const links = db.prepare('SELECT section_a_id AS a,section_b_id AS b FROM section_connections WHERE section_a_id=? OR section_b_id=?').all(sectionId, sectionId);
         if (links.some(link => !set.has(link.a) || !set.has(link.b))) throw new Error('Remove or relink section connections before reassigning this floor.');
         const stair = db.prepare(`SELECT m.id FROM markers m JOIN markers p ON p.id=m.stair_destination_id JOIN sections s ON s.id=p.section_id WHERE m.section_id=? AND s.floor_id=?`).get(sectionId, destination);
         if (stair) throw new Error('Unlink stairs before reassigning this floor; both endpoints would be on one floor.');
       }
+      for (const link of internalConnections) db.prepare('DELETE FROM section_connections WHERE id=?').run(link.id);
       for (const sectionId of sections) db.prepare('UPDATE sections SET floor_id=? WHERE id=?').run(destination, sectionId);
+      for (const link of internalConnections) db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label) VALUES(?,?,?,?,?,?,?,?)').run(link.id,link.section_a_id,link.x_a,link.z_a,link.section_b_id,link.x_b,link.z_b,link.label);
     }
     if (db.prepare('SELECT 1 FROM sections WHERE floor_id=?').get(id)) throw new Error('Resolve all sections before deleting this floor.');
     const order = db.prepare('SELECT sort_order FROM floors WHERE id=?').get(id).sort_order;

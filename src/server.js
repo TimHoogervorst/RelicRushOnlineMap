@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
 
@@ -35,6 +35,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const sectionHistory = new Map();
   const connectionHistory = new Map();
   const renderSettingsHistory = new Map();
+  const lifecycleHistory = new Map();
   const rememberMarker = (token, command) => {
     const history = markerHistory.get(token) ?? { undo: [], redo: [] };
     history.undo.push(command);
@@ -86,7 +87,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -141,7 +142,12 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const lifecycleMutation = async (req, res, operation, geometry = false) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {
+      const before = captureProjectLifecycleState(db);
       const result = operation(db);
+      const token = getSession(req).token, history = lifecycleHistory.get(token) ?? { undo: [], redo: [] };
+      history.undo.push({ before, after: captureProjectLifecycleState(db), revision: result.revision });
+      if (history.undo.length > 10) history.undo.shift();
+      history.redo = []; lifecycleHistory.set(token, history);
       try {
         const saved = geometry ? await generation.save(snapshotProject(db)) : await generation.saveMetadata(snapshotProject(db));
         return res.json({ ...result, saved: true, status: generation.queue.status });
@@ -161,6 +167,24 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.put('/api/project/sections/:id/order', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => reorderSection(db,req.params.id,req.body?.sortOrder,req.body?.expectedRevision)));
   app.put('/api/project/sections/:id/floor', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => moveSectionToFloor(db,req.params.id,req.body?.floorId,req.body?.expectedRevision),true));
   app.delete('/api/project/sections/:id', requireEditor, requireSameOrigin, (req,res) => void lifecycleMutation(req,res,db => deleteSectionLifecycle(db,req.params.id,req.body?.resolution,req.body?.expectedRevision),true));
+  for (const direction of ['undo','redo']) app.post(`/api/project/lifecycle/${direction}`, requireEditor, requireSameOrigin, async (req,res) => {
+    const token = getSession(req).token, history = lifecycleHistory.get(token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'], command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no floor or section change to ${direction}.` });
+    const db = openProject(path.join(dataDir,'project.sqlite'));
+    try {
+      const expectedRevision = req.body?.expectedRevision;
+      if (expectedRevision !== command.revision) return res.status(409).json({ error: 'Another project edit followed this lifecycle change. Reload before undo or redo.' });
+      const result = restoreProjectLifecycleState(db,direction === 'undo' ? command.before : command.after,expectedRevision);
+      command.revision = result.revision; source.pop(); target.push(command); lifecycleHistory.set(token,history);
+      if (source.at(-1)) source.at(-1).revision = result.revision;
+      try {
+        const saved = await generation.save(snapshotProject(db));
+        return res.json({ ...result, saved: true, status: generation.queue.status });
+      } catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) { return res.status(/another editor tab|history|floor|section|marker|connection/i.test(error.message) ? 409 : 400).json({ error: error.message }); }
+    finally { db.close(); }
+  });
   app.get('/api/project/stairs', requireEditor, async (_req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {

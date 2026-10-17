@@ -687,7 +687,12 @@ function centerMarker(marker) {
 }
 async function refreshPublicManifest() {
   const response = await fetch('/api/map/manifest', { cache: 'no-store' });
-  if (response.ok) publicMap = await response.json();
+  if (response.ok) {
+    publicMap = await response.json();
+    const selector = document.querySelector('#floor'), selected = selector.value;
+    selector.replaceChildren(...publicMap.floors.map(floor => new Option(floor.name, floor.id)));
+    selector.value = publicMap.floors.some(floor => floor.id === selected) ? selected : (publicMap.floors[0]?.id ?? '');
+  }
 }
 async function followStair(marker) {
   if (!marker.stairDestinationId) { showMarkerPopup(marker, 'Destination not yet mapped.'); return; }
@@ -858,10 +863,19 @@ async function lifecycleRequest(url, method, payload) {
   const result = await response.json();
   const status = document.querySelector('#lifecycle-status'); status.textContent = response.ok ? (result.saved ? 'Saved. Visitors will see this change on refresh.' : `Change saved locally; ${result.warning}. Use Save to retry.`) : result.error;
   if (result.status) setSaveStatus(result.status);
-  if (response.ok) { await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+  if (response.ok) { await refreshPublicManifest(); await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
   return { response, result };
 }
 const lifecycleValue = id => document.querySelector(id).value.trim();
+async function lifecycleHistoryCommand(direction) {
+  const response = await fetch(`/api/project/lifecycle/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
+  const result = await response.json();
+  document.querySelector('#lifecycle-status').textContent = response.ok ? (result.saved ? `${direction === 'undo' ? 'Undo' : 'Redo'} saved.` : `Change applied; ${result.warning}. Use Save to retry.`) : result.error;
+  if (result.status) setSaveStatus(result.status);
+  if (response.ok) { await refreshPublicManifest(); await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus(); }
+}
+document.querySelector('#lifecycle-undo').addEventListener('click', () => void lifecycleHistoryCommand('undo'));
+document.querySelector('#lifecycle-redo').addEventListener('click', () => void lifecycleHistoryCommand('redo'));
 document.querySelector('#lifecycle-rename-floor').addEventListener('click', () => void lifecycleRequest(`/api/project/floors/${encodeURIComponent(document.querySelector('#floor').value)}`,'PUT',{name:lifecycleValue('#lifecycle-name')}));
 document.querySelector('#lifecycle-rename-section').addEventListener('click', () => void lifecycleRequest(`/api/project/sections/${encodeURIComponent(document.querySelector('#layout-section').value)}/name`,'PUT',{name:lifecycleValue('#lifecycle-name')}));
 document.querySelector('#lifecycle-move-section').addEventListener('click', () => void lifecycleRequest(`/api/project/sections/${encodeURIComponent(document.querySelector('#layout-section').value)}/floor`,'PUT',{floorId:document.querySelector('#lifecycle-floor-target').value}));
