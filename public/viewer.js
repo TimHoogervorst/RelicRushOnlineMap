@@ -8,6 +8,8 @@ const editorPanel = document.querySelector('#editor-panel');
 const loginPanel = document.querySelector('#login-panel');
 const setupPanel = document.querySelector('#setup-panel');
 let zoom = 1, offsetX = 0, offsetY = 0, pointer = null, slicePreviewActive = false;
+const mapPointers = new Map();
+let pinch = null, suppressMapClick = false;
 
 function drawTransform() { frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`; }
 function fitFloor() {
@@ -51,10 +53,68 @@ viewport.addEventListener('wheel', event => {
   }
   setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
 }, { passive: false });
-viewport.addEventListener('pointerdown', event => { if (event.target.closest('.map-marker, .section-label, #marker-popup')) return; pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey }; viewport.setPointerCapture(event.pointerId); frame.classList.add('dragging'); });
-viewport.addEventListener('pointermove', event => { if (!pointer || pointer.id !== event.pointerId) return; if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 4) pointer.moved = true; offsetX += event.clientX - pointer.x; offsetY += event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; drawTransform(); });
-function endPointer(event) { if (pointer?.id === event.pointerId) { const click = !pointer.moved, target = pointer.target, shiftKey = pointer.shiftKey; pointer = null; frame.classList.remove('dragging'); if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY, shiftKey); } }
-viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer);
+viewport.addEventListener('pointerdown', event => {
+  if (event.target.closest('.map-marker, .section-label, #marker-popup')) return;
+  mapPointers.set(event.pointerId, { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey });
+  viewport.setPointerCapture(event.pointerId);
+  if (mapPointers.size === 1) {
+    pointer = { id: event.pointerId };
+    frame.classList.add('dragging');
+  } else {
+    pointer = null;
+    suppressMapClick = true;
+    frame.classList.remove('dragging');
+    if (mapPointers.size === 2) {
+      const [a, b] = [...mapPointers.values()];
+      pinch = { distance: Math.hypot(b.x - a.x, b.y - a.y), midpointX: (a.x + b.x) / 2, midpointY: (a.y + b.y) / 2 };
+    }
+  }
+});
+viewport.addEventListener('pointermove', event => {
+  const moved = mapPointers.get(event.pointerId);
+  if (!moved) return;
+  if (Math.hypot(event.clientX - moved.startX, event.clientY - moved.startY) > 4) moved.moved = true;
+  const previousX = moved.x, previousY = moved.y;
+  moved.x = event.clientX; moved.y = event.clientY;
+  if (mapPointers.size === 1 && pointer?.id === event.pointerId) {
+    offsetX += event.clientX - previousX; offsetY += event.clientY - previousY;
+    drawTransform();
+    return;
+  }
+  if (mapPointers.size !== 2 || !pinch) return;
+  const [a, b] = [...mapPointers.values()];
+  const distance = Math.hypot(b.x - a.x, b.y - a.y);
+  const midpointX = (a.x + b.x) / 2, midpointY = (a.y + b.y) / 2;
+  // Move the map with the gesture midpoint, then scale around that midpoint.
+  offsetX += midpointX - pinch.midpointX; offsetY += midpointY - pinch.midpointY;
+  if (pinch.distance > 0 && distance > 0) setZoom(zoom * distance / pinch.distance, midpointX, midpointY);
+  else drawTransform();
+  pinch = { distance, midpointX, midpointY };
+});
+function endPointer(event) {
+  const ended = mapPointers.get(event.pointerId);
+  if (!ended) return;
+  mapPointers.delete(event.pointerId);
+  if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+  const wasPinching = pinch !== null || suppressMapClick;
+  pinch = null;
+  pointer = null;
+  frame.classList.remove('dragging');
+  if (mapPointers.size === 1) {
+    const [id, remaining] = mapPointers.entries().next().value;
+    pointer = { id };
+    remaining.x = remaining.startX = remaining.x;
+    remaining.y = remaining.startY = remaining.y;
+    remaining.moved = true;
+    if (viewport.hasPointerCapture(id)) viewport.setPointerCapture(id);
+  }
+  if (mapPointers.size === 0) {
+    const click = !wasPinching && !ended.moved, target = ended.target, shiftKey = ended.shiftKey;
+    suppressMapClick = false;
+    if (click && editorOpen && floorManifest && target === image) void inspectBlockAt(event.clientX, event.clientY, shiftKey);
+  }
+}
+viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer); viewport.addEventListener('lostpointercapture', endPointer);
 image.addEventListener('load', () => { if (!slicePreviewActive) fitFloor(); if (pendingCenterMarker) { const target = pendingCenterMarker; pendingCenterMarker = null; centerMarker(target); } renderSelection(); });
 
 let editorOpen = false, editorAuthenticated = false, sidebarOpen = !window.matchMedia('(max-width: 600px)').matches, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null, pendingCenterMarker = null;
