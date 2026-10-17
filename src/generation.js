@@ -1,8 +1,33 @@
 import path from 'node:path';
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
+
+const GENERATOR_VERSION = '1';
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return createHash('sha256').update(typeof value === 'string' ? value : canonicalJson(value)).digest('hex');
+}
+
+function projectHash(snapshot) {
+  const { revision: _revision, ...content } = snapshot;
+  return sha256(content);
+}
+
+function renderSettings(snapshot) {
+  return (snapshot.floors ?? []).map(floor => ({
+    id: floor.id,
+    renderOptions: floor.renderOptions ?? {},
+    sections: (floor.sections ?? []).map(section => ({ id: section.id, renderSettings: section.renderSettings ?? {} })).sort((a, b) => a.id.localeCompare(b.id)),
+  })).sort((a, b) => a.id.localeCompare(b.id));
+}
 
 function atomicJson(file, value) {
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -27,6 +52,15 @@ export function renderInWorker(input) {
 export function createGenerationService({ dataDir, renderer, assetsDir }) {
   const queue = new SaveQueue();
   const releasesDir = path.join(dataDir, 'releases');
+
+  async function assetFingerprint() {
+    let vanilla = null, resourcePack = null;
+    try { vanilla = JSON.parse(await readFile(path.join(assetsDir, 'asset-source.json'), 'utf8')); } catch {}
+    try { resourcePack = JSON.parse(await readFile(path.join(path.dirname(assetsDir), 'resource-pack', 'resource-pack-source.json'), 'utf8')); } catch {}
+    const assetVersion = { minecraft: vanilla?.minecraftVersion ?? null, world: vanilla?.worldVersion ?? null, resourcePack: resourcePack?.packFormat ?? null };
+    const assetHash = sha256({ vanilla: vanilla?.sha256 ?? null, resourcePack: resourcePack?.sha256 ?? null });
+    return { assetVersion, assetHash };
+  }
 
   async function save(snapshot) {
     return queue.enqueue(snapshot.revision, async ({ isLatest, progress }) => {
@@ -72,7 +106,8 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
         progress('Writing revision snapshot', 90);
         let resourcePack = null;
         try { resourcePack = JSON.parse(await readFile(path.join(path.dirname(assetsDir), 'resource-pack', 'resource-pack-source.json'), 'utf8')); } catch {}
-        const manifest = { manifestVersion: 1, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), resourcePack, floors };
+        const assets = await assetFingerprint();
+        const manifest = { manifestVersion: 1, generatorVersion: GENERATOR_VERSION, projectRevision: snapshot.revision, projectHash: projectHash(snapshot), assetVersion: assets.assetVersion, assetHash: assets.assetHash, renderSettingsHash: sha256(renderSettings(snapshot)), generatedAt: new Date().toISOString(), resourcePack, floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
@@ -116,7 +151,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
         progress('Writing metadata revision', 90);
         floors.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
-        const manifest = { ...previousManifest, projectRevision: snapshot.revision, generatedAt: new Date().toISOString(), floors };
+        const manifest = { ...previousManifest, projectRevision: snapshot.revision, projectHash: projectHash(snapshot), generatedAt: new Date().toISOString(), floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));
         await rm(final, { recursive: true, force: true });
