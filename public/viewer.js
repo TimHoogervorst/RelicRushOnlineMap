@@ -248,21 +248,21 @@ function readRenderSettings() {
   });
   return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000 };
 }
-async function saveRenderSettings() {
-  const section = selectedLayoutSection(), status = document.querySelector('#render-settings-status'); if (!section) return;
+async function saveRenderSettings(status = document.querySelector('#render-settings-status')) {
+  const section = selectedLayoutSection(); if (!section) return;
   try {
-    const settings = readRenderSettings(); status.textContent = 'Saving settings and regenerating map…';
+    const settings = readRenderSettings(); status.textContent = status.id === 'render-shade-status' ? 'Saving shading and regenerating map...' : 'Saving settings and regenerating map...';
     const response = await fetch(`/api/project/sections/${encodeURIComponent(section.id)}/render-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, settings }) });
     const result = await response.json();
     if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
     projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
-    if (!result.saved) { status.textContent = `Settings retained; ${result.warning}. Use Save to retry.`; return; }
-    status.textContent = 'Render settings saved. The visitor map was regenerated.'; await loadFloor(floorManifest.id); await refreshSaveStatus();
+    if (!result.saved) { status.textContent = `${status.id === 'render-shade-status' ? 'Shading' : 'Settings'} retained; ${result.warning}. Change the slider to retry.`; return; }
+    status.textContent = status.id === 'render-shade-status' ? 'Shading saved. The map was regenerated.' : 'Render settings saved. The visitor map was regenerated.'; await loadFloor(floorManifest.id); await refreshSaveStatus();
   } catch (error) { status.textContent = error.message; }
 }
 document.querySelector('#render-settings-save').addEventListener('click', () => void saveRenderSettings());
-document.querySelector('#render-shade-save').addEventListener('click', () => void saveRenderSettings());
 document.querySelector('#render-height-shade').addEventListener('input', event => { document.querySelector('#render-height-shade-value').value = `${event.target.value}%`; });
+document.querySelector('#render-height-shade').addEventListener('change', () => void saveRenderSettings(document.querySelector('#render-shade-status')));
 async function renderSettingsHistory(direction) {
   const status = document.querySelector('#render-settings-status');
   const response = await fetch(`/api/project/render-settings/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
