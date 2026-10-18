@@ -109,13 +109,16 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
       for (const element of model.elements) {
         const face = element.faces?.up;
         if (face?.texture && Array.isArray(element.from) && Array.isArray(element.to)) {
-          const texture = resolveTexture(model, face);
+          const texture = block.id === 'minecraft:grass_block'
+            ? 'minecraft:block/moss_block'
+            : resolveTexture(model, face);
           if (!texture) diagnostics.add(block.id);
           else {
             const pixels = await textureData(texture);
             if (pixels) {
               const uv = face.uv ?? [element.from[0], element.from[2], element.to[0], element.to[2]];
-              models.push({ element, pixels, uv, rotateY: ((variant.y ?? 0) % 360 + 360) % 360, uvRotation: face.rotation ?? 0, tint: face.tintindex === undefined ? null : defaultBiomeTint(block.id) });
+              const grassUsesMossTexture = block.id === 'minecraft:grass_block';
+              models.push({ element, pixels, uv, rotateY: ((variant.y ?? 0) % 360 + 360) % 360, uvRotation: face.rotation ?? 0, tint: !grassUsesMossTexture && face.tintindex !== undefined ? defaultBiomeTint(block.id) : null });
             }
           }
         }
@@ -262,7 +265,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),
-    renderer: { name: 'relic-ortho-model-rasterizer', version: 3, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
+    renderer: { name: 'relic-ortho-model-rasterizer', version: 4, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
   };
 }
 
