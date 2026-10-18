@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
 
-const GENERATOR_VERSION = '7';
+const GENERATOR_VERSION = '8';
 const DEFAULT_HIDDEN_BLOCKS = new Set(['minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:decorated_pot', 'minecraft:player_head']);
 
 function canonicalJson(value) {
@@ -95,7 +95,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
             return !(settings.cutaways ?? []).some(box => x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height && z >= box.z && z < box.z + box.depth);
           }).map(({ sectionId, localX, localY, localZ, ...block }) => block);
           const settings = floor.renderOptions ?? floor.sections?.[0]?.renderSettings ?? {};
-          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] });
+          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, heightShadeMinY: settings.heightShadeMinY ?? null, heightShadeMaxY: settings.heightShadeMaxY ?? null, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] });
           const outputPath = path.join(temporary, output);
           const [info, signature] = await Promise.all([stat(outputPath), readFile(outputPath).then(bytes => bytes.subarray(0, 8))]);
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {

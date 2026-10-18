@@ -238,6 +238,8 @@ function populateSectionLayout() {
   const shadeStrength = Math.round(settings.heightShadePerBlock * 2000);
   document.querySelector('#render-height-shade').value = shadeStrength;
   document.querySelector('#render-height-shade-value').value = `${shadeStrength}%`;
+  document.querySelector('#render-height-shade-min-y').value = settings.heightShadeMinY ?? '';
+  document.querySelector('#render-height-shade-max-y').value = settings.heightShadeMaxY ?? '';
 }
 function readRenderSettings() {
   const lines = document.querySelector('#render-cutaway').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -246,7 +248,9 @@ function readRenderSettings() {
     if (values.length !== 6 || values.some(value => !Number.isSafeInteger(value))) throw new Error('Each cutaway line needs six whole numbers: x,y,z,width,height,depth.');
     const [x,y,z,width,height,depth] = values; return { x,y,z,width,height,depth };
   });
-  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000 };
+  const minYValue = document.querySelector('#render-height-shade-min-y').value;
+  const maxYValue = document.querySelector('#render-height-shade-max-y').value;
+  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000, heightShadeMinY: minYValue === '' ? null : Number(minYValue), heightShadeMaxY: maxYValue === '' ? null : Number(maxYValue) };
 }
 async function saveRenderSettings(status = document.querySelector('#render-settings-status')) {
   const section = selectedLayoutSection(); if (!section) return;
@@ -257,12 +261,33 @@ async function saveRenderSettings(status = document.querySelector('#render-setti
     if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
     projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
     if (!result.saved) { status.textContent = `${status.id === 'render-shade-status' ? 'Shading' : 'Settings'} retained; ${result.warning}. Change the slider to retry.`; return; }
-    status.textContent = status.id === 'render-shade-status' ? 'Shading saved. The map was regenerated.' : 'Render settings saved. The visitor map was regenerated.'; await loadFloor(floorManifest.id); await refreshSaveStatus();
+    const shadeDraft = status.id === 'render-shade-status' ? {
+      strength: document.querySelector('#render-height-shade').value,
+      minY: document.querySelector('#render-height-shade-min-y').value,
+      maxY: document.querySelector('#render-height-shade-max-y').value
+    } : null;
+    const shadeChangedWhileSaving = shadeDraft && (shadeDraft.strength !== String(Math.round(settings.heightShadePerBlock * 2000)) || shadeDraft.minY !== String(settings.heightShadeMinY ?? '') || shadeDraft.maxY !== String(settings.heightShadeMaxY ?? ''));
+    status.textContent = status.id === 'render-shade-status' ? 'Shading saved. The map was regenerated.' : 'Render settings saved. The visitor map was regenerated.';
+    await loadFloor(floorManifest.id);
+    if (shadeChangedWhileSaving) {
+      document.querySelector('#render-height-shade').value = shadeDraft.strength;
+      document.querySelector('#render-height-shade-value').value = `${shadeDraft.strength}%`;
+      document.querySelector('#render-height-shade-min-y').value = shadeDraft.minY;
+      document.querySelector('#render-height-shade-max-y').value = shadeDraft.maxY;
+    }
+    await refreshSaveStatus();
   } catch (error) { status.textContent = error.message; }
 }
-document.querySelector('#render-settings-save').addEventListener('click', () => void saveRenderSettings());
+let renderSettingsSaveQueue = Promise.resolve();
+function queueRenderSettingsSave(status = document.querySelector('#render-settings-status')) {
+  renderSettingsSaveQueue = renderSettingsSaveQueue.then(() => saveRenderSettings(status));
+  return renderSettingsSaveQueue;
+}
+document.querySelector('#render-settings-save').addEventListener('click', () => void queueRenderSettingsSave());
 document.querySelector('#render-height-shade').addEventListener('input', event => { document.querySelector('#render-height-shade-value').value = `${event.target.value}%`; });
-document.querySelector('#render-height-shade').addEventListener('change', () => void saveRenderSettings(document.querySelector('#render-shade-status')));
+for (const id of ['render-height-shade', 'render-height-shade-min-y', 'render-height-shade-max-y']) {
+  document.querySelector(`#${id}`).addEventListener('change', () => void queueRenderSettingsSave(document.querySelector('#render-shade-status')));
+}
 async function renderSettingsHistory(direction) {
   const status = document.querySelector('#render-settings-status');
   const response = await fetch(`/api/project/render-settings/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
