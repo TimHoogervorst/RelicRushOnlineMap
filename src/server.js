@@ -72,7 +72,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     activeWorker.on('exit', code => { if (code && !workerState.error) workerState = { ready: false, error: `Initialization worker exited (${code})` }; });
   };
 
-  app.use(express.static(path.join(root, 'public'), { etag: true, maxAge: '1h', dotfiles: 'deny' }));
+  app.use(express.static(path.join(root, 'public'), { etag: true, maxAge: 0, dotfiles: 'deny' }));
   app.use(express.json({ limit: '32kb' }));
   app.post('/api/auth/login', requireSameOrigin, (req, res) => {
     const key = req.ip ?? req.socket.remoteAddress ?? 'unknown';

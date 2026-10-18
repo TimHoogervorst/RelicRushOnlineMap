@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
 
-const GENERATOR_VERSION = '1';
+const GENERATOR_VERSION = '2';
 const DEFAULT_HIDDEN_BLOCKS = new Set(['minecraft:brown_mushroom_block', 'minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:glow_lichen', 'minecraft:decorated_pot', 'minecraft:seagrass']);
 
 function canonicalJson(value) {
@@ -70,7 +70,12 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
       try {
         const pointer = JSON.parse(await readFile(path.join(releasesDir, 'current.json'), 'utf8'));
         if (pointer.revision > snapshot.revision) throw new Error('Stale revision; reload and retry your edit.');
-        if (pointer.revision === snapshot.revision) return { revision: snapshot.revision, reused: true };
+        if (pointer.revision === snapshot.revision) {
+          try {
+            const currentManifest = JSON.parse(await readFile(path.join(releasesDir, pointer.directory, 'manifest.json'), 'utf8'));
+            if (currentManifest.generatorVersion === GENERATOR_VERSION) return { revision: snapshot.revision, reused: true };
+          } catch { /* Rebuild an incomplete or older release below. */ }
+        }
       } catch (error) { if (error.message.startsWith('Stale revision')) throw error; }
       const tempName = `.building-${snapshot.revision}-${randomUUID()}`;
       const temporary = path.join(releasesDir, tempName);
