@@ -7,7 +7,6 @@ const legendPanel = document.querySelector('#legend-panel');
 const editorPanel = document.querySelector('#editor-panel');
 const loginPanel = document.querySelector('#login-panel');
 const setupPanel = document.querySelector('#setup-panel');
-const defaultHiddenBlocks = ['minecraft:brown_mushroom_block', 'minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:glow_lichen', 'minecraft:decorated_pot', 'minecraft:seagrass'];
 let zoom = 1, offsetX = 0, offsetY = 0, pointer = null, slicePreviewActive = false;
 const mapPointers = new Map();
 let pinch = null, suppressMapClick = false;
@@ -233,7 +232,7 @@ function populateSectionLayout() {
   document.querySelector('#section-label-z').value = section.labelZ;
   const settings = section.renderSettings ?? { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018 };
   document.querySelector('#render-cutaway').value = settings.cutaways.map(box => [box.x,box.y,box.z,box.width,box.height,box.depth].join(',')).join('\n');
-  document.querySelector('#render-excluded').value = [...new Set([...defaultHiddenBlocks, ...settings.excludedBlocks])].join(', ');
+  document.querySelector('#render-excluded').value = settings.excludedBlocks.join(', ');
   document.querySelector('#render-pixel-size').value = settings.pixelSize;
   document.querySelector('#render-height-shade').value = settings.heightShadePerBlock;
 }

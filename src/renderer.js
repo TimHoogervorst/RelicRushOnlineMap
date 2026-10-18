@@ -85,6 +85,16 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     const state = await readJson(path.join(assets, 'blockstates', `${resourcePath(blockstateId)}.json`));
     const selected = state ? matchingModels(state, block.properties ?? {}) : [];
     const models = [];
+    let proxy = null;
+    const resolveTexture = (model, face) => {
+      let texture = face?.texture;
+      const seen = new Set();
+      while (typeof texture === 'string' && texture.startsWith('#') && !seen.has(texture)) {
+        seen.add(texture);
+        texture = model.textures[texture.slice(1)];
+      }
+      return typeof texture === 'string' ? texture : null;
+    };
     if (block.id === 'minecraft:water') {
       const pixels = await textureData('minecraft:block/water_still');
       if (pixels) {
@@ -98,39 +108,56 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
       if (!model) continue;
       for (const element of model.elements) {
         const face = element.faces?.up;
-        if (!face?.texture || !Array.isArray(element.from) || !Array.isArray(element.to)) continue;
-        let texture = face.texture;
-        const seen = new Set();
-        while (typeof texture === 'string' && texture.startsWith('#') && !seen.has(texture)) { seen.add(texture); texture = model.textures[texture.slice(1)]; }
-        if (typeof texture !== 'string') { diagnostics.add(block.id); continue; }
-        const pixels = await textureData(texture);
-        if (!pixels) continue;
-        const uv = face.uv ?? [element.from[0], element.from[2], element.to[0], element.to[2]];
-        models.push({ element, pixels, uv, rotateY: ((variant.y ?? 0) % 360 + 360) % 360, uvRotation: face.rotation ?? 0, tint: face.tintindex === undefined ? null : defaultBiomeTint(block.id) });
+        if (face?.texture && Array.isArray(element.from) && Array.isArray(element.to)) {
+          const texture = resolveTexture(model, face);
+          if (!texture) diagnostics.add(block.id);
+          else {
+            const pixels = await textureData(texture);
+            if (pixels) {
+              const uv = face.uv ?? [element.from[0], element.from[2], element.to[0], element.to[2]];
+              models.push({ element, pixels, uv, rotateY: ((variant.y ?? 0) % 360 + 360) % 360, uvRotation: face.rotation ?? 0, tint: face.tintindex === undefined ? null : defaultBiomeTint(block.id) });
+            }
+          }
+        }
+        if (!proxy) {
+          for (const [faceName, sideFace] of Object.entries(element.faces ?? {})) {
+            if (faceName === 'up' || !sideFace?.texture) continue;
+            const texture = resolveTexture(model, sideFace);
+            if (!texture) continue;
+            const pixels = await textureData(texture);
+            if (pixels) {
+              proxy = { pixels, tint: sideFace.tintindex === undefined ? null : defaultBiomeTint(block.id) };
+              break;
+            }
+          }
+        }
       }
     }
-    stateModelCache.set(cacheKey, models);
-    if (!models.length) diagnostics.add(block.id);
-    return models;
+    const result = { faces: models, proxy };
+    stateModelCache.set(cacheKey, result);
+    if (!models.length && !proxy) diagnostics.add(block.id);
+    return result;
   };
 
   let lowY = Infinity, highY = -Infinity;
   const ordered = [...schematic.blocks].sort((a, b) => a.y - b.y);
   const prepared = [];
   for (const block of ordered) {
-    const faces = await blockModels(block);
-    if (!faces.length) {
+    const rendered = await blockModels(block);
+    if (!rendered.faces.length) {
       lowY = Math.min(lowY, block.y);
       highY = Math.max(highY, block.y + 1);
-      specialFallbacks.add(`${block.id} uses a visible magenta cross fallback because no top-face model could be rendered`);
+      specialFallbacks.add(rendered.proxy
+        ? `${block.id} uses a translucent texture proxy because its model has no top face`
+        : `${block.id} uses a magenta outline fallback because no top-face model or texture proxy could be rendered`);
     }
-    for (const { element } of faces) {
+    for (const { element } of rendered.faces) {
       lowY = Math.min(lowY, block.y + element.from[1] / 16);
       highY = Math.max(highY, block.y + element.to[1] / 16);
     }
-    prepared.push({ block, faces });
+    prepared.push({ block, ...rendered });
   }
-  for (const { block, faces } of prepared) {
+  for (const { block, faces, proxy } of prepared) {
     if (!faces.length) {
       const startX = Math.max(0, block.x * pixelSize), endX = Math.min(outWidth, (block.x + 1) * pixelSize);
       const startY = Math.max(0, (depth - block.z - 1) * pixelSize), endY = Math.min(outHeight, (depth - block.z) * pixelSize);
@@ -138,12 +165,29 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
         const at = py * outWidth + px;
         if (block.y + 1 < zBuffer[at]) continue;
         const lx = (px - startX) % pixelSize, ly = (py - startY) % pixelSize;
-        const edge = lx === 0 || ly === 0 || lx === pixelSize - 1 || ly === pixelSize - 1;
-        const cross = lx === ly || lx + ly === pixelSize - 1;
-        const color = edge || cross ? [255, 0, 220] : [52, 36, 52];
         const dest = at * 4;
-        raw[dest] = color[0]; raw[dest + 1] = color[1]; raw[dest + 2] = color[2]; raw[dest + 3] = 255;
-        zBuffer[at] = block.y + 1;
+        if (proxy) {
+          const tx = Math.min(proxy.pixels.width - 1, Math.floor(lx * proxy.pixels.width / pixelSize));
+          const ty = Math.min(proxy.pixels.height - 1, Math.floor(ly * proxy.pixels.height / pixelSize));
+          const sample = (ty * proxy.pixels.width + tx) * 4;
+          const alpha = Math.round(proxy.pixels.data[sample + 3] * 0.72);
+          if (!alpha) continue;
+          const mix = alpha / 255;
+          raw[dest] = Math.round(proxy.pixels.data[sample] * (proxy.tint?.[0] ?? 255) / 255 * mix + raw[dest] * (1 - mix));
+          raw[dest + 1] = Math.round(proxy.pixels.data[sample + 1] * (proxy.tint?.[1] ?? 255) / 255 * mix + raw[dest + 1] * (1 - mix));
+          raw[dest + 2] = Math.round(proxy.pixels.data[sample + 2] * (proxy.tint?.[2] ?? 255) / 255 * mix + raw[dest + 2] * (1 - mix));
+          raw[dest + 3] = Math.max(raw[dest + 3], alpha);
+        } else {
+          const edge = lx === 0 || ly === 0 || lx === pixelSize - 1 || ly === pixelSize - 1;
+          const cross = lx === ly || lx + ly === pixelSize - 1;
+          if (edge || cross) {
+            const mix = 0.7;
+            raw[dest] = Math.round(255 * mix + raw[dest] * (1 - mix));
+            raw[dest + 1] = Math.round(raw[dest + 1] * (1 - mix));
+            raw[dest + 2] = Math.round(220 * mix + raw[dest + 2] * (1 - mix));
+            raw[dest + 3] = Math.max(raw[dest + 3], 180);
+          }
+        }
         surfaceBuffer[at] = Math.max(surfaceBuffer[at], block.y + 1);
       }
       continue;
