@@ -933,6 +933,117 @@ export function restoreSectionLayout(db, command, direction, expectedRevision) {
   return { sectionId: command.sectionId, before: current, after: target, revision: expectedRevision + 1 };
 }
 
+function sectionTransformState(db, sectionId) {
+  const section = db.prepare('SELECT id,bounds_json,label_x,label_z FROM sections WHERE id=?').get(sectionId);
+  if (!section) throw new Error('Section does not exist.');
+  return {
+    section,
+    chunks: db.prepare('SELECT chunk_x,chunk_y,chunk_z,format_version,blob FROM section_chunks WHERE section_id=?').all(sectionId),
+    markers: db.prepare('SELECT id,x,z FROM markers WHERE section_id=?').all(sectionId),
+    connections: db.prepare('SELECT id,section_a_id,x_a,z_a,section_b_id,x_b,z_b FROM section_connections WHERE section_a_id=? OR section_b_id=?').all(sectionId, sectionId)
+  };
+}
+
+function transformedPoint(x, z, width, depth, operation, cell = false, inverse = false) {
+  const { rotation, flipHorizontal, flipVertical } = operation;
+  const maxX = amount => amount - (cell ? 1 : 0), maxZ = amount => amount - (cell ? 1 : 0);
+  let nextWidth = width, nextDepth = depth, nextX = x, nextZ = z;
+  const rotate = degrees => {
+    if (degrees === 90) { [nextX, nextZ] = [maxZ(nextDepth) - nextZ, nextX]; [nextWidth, nextDepth] = [nextDepth, nextWidth]; }
+    else if (degrees === 180) { nextX = maxX(nextWidth) - nextX; nextZ = maxZ(nextDepth) - nextZ; }
+    else if (degrees === 270) { [nextX, nextZ] = [nextZ, maxX(nextWidth) - nextX]; [nextWidth, nextDepth] = [nextDepth, nextWidth]; }
+  };
+  const flip = () => {
+    if (flipHorizontal) nextX = maxX(nextWidth) - nextX;
+    if (flipVertical) nextZ = maxZ(nextDepth) - nextZ;
+  };
+  if (inverse) { rotate((360 - rotation) % 360); flip(); }
+  else { flip(); rotate(rotation); }
+  return { x: nextX, z: nextZ };
+}
+
+function transformedDirection(direction, operation, inverse = false) {
+  const vectors = { north: [0,-1], east: [1,0], south: [0,1], west: [-1,0] };
+  if (!vectors[direction]) return direction;
+  let [x,z] = vectors[direction];
+  const reflect = () => { if (operation.flipHorizontal) x = -x; if (operation.flipVertical) z = -z; };
+  const rotate = degrees => { for (let i = 0; i < degrees / 90; i++) [x,z] = [-z,x]; };
+  if (inverse) { rotate((360 - operation.rotation) % 360); reflect(); }
+  else { reflect(); rotate(operation.rotation); }
+  return Object.entries(vectors).find(([, vector]) => vector[0] === x && vector[1] === z)?.[0] ?? direction;
+}
+
+function transformBlockProperties(properties, operation, inverse = false) {
+  const result = { ...(properties ?? {}) };
+  const transform = direction => transformedDirection(direction, operation, inverse);
+  for (const key of Object.keys(result)) {
+    if (['facing','horizontal_facing','direction'].includes(key)) result[key] = transform(result[key]);
+    else if (key === 'axis' && operation.rotation % 180 !== 0 && (result[key] === 'x' || result[key] === 'z')) result[key] = result[key] === 'x' ? 'z' : 'x';
+    else if (key === 'rotation' && /^\d+$/.test(String(result[key]))) {
+      const angle = Number(result[key]) % 16, radians = angle * Math.PI / 8;
+      let x = -Math.sin(radians), z = Math.cos(radians);
+      const reflect = () => { if (operation.flipHorizontal) x = -x; if (operation.flipVertical) z = -z; };
+      const rotate = degrees => { for (let i = 0; i < degrees / 90; i++) [x,z] = [-z,x]; };
+      if (inverse) { rotate((360 - operation.rotation) % 360); reflect(); } else { reflect(); rotate(operation.rotation); }
+      result[key] = String((Math.round(Math.atan2(-x,z) * 8 / Math.PI) + 16) % 16);
+    } else if (['shape','orientation'].includes(key)) {
+      result[key] = String(result[key]).split('_').map(token => transform(token)).join('_');
+      if ((operation.flipHorizontal !== operation.flipVertical) && /(^|_)(left|right)($|_)/.test(result[key])) result[key] = result[key].replace(/left|right/g, token => token === 'left' ? 'right' : 'left');
+    } else if (['hinge','type'].includes(key) && operation.flipHorizontal !== operation.flipVertical && (result[key] === 'left' || result[key] === 'right')) result[key] = result[key] === 'left' ? 'right' : 'left';
+  }
+  const directionValues = Object.fromEntries(['north','east','south','west'].filter(direction => Object.hasOwn(result,direction)).map(direction => [direction,result[direction]]));
+  for (const direction of Object.keys(directionValues)) delete result[direction];
+  for (const [direction,value] of Object.entries(directionValues)) result[transform(direction)] = value;
+  return result;
+}
+
+function applySectionTransform(db, sectionId, operation, inverse = false) {
+  const state = sectionTransformState(db, sectionId), bounds = JSON.parse(state.section.bounds_json);
+  const { rotation, flipHorizontal, flipVertical } = operation;
+  if (rotation === 0 && !flipHorizontal && !flipVertical) throw new Error('Choose a rotation or flip for this section.');
+  const point = (x,z,cell=false) => transformedPoint(x,z,bounds.x,bounds.z,operation,cell,inverse);
+  const blocks = readSectionBlocks(db, sectionId).map(block => ({ ...block, ...point(block.x,block.z,true), properties: transformBlockProperties(block.properties,operation,inverse) }));
+  const entities = state.chunks.flatMap(chunk => decodeChunkBlob(chunk.blob).blockEntities ?? []).map(entity => ({ ...entity, ...point(entity.x,entity.z,true) }));
+  const markers = state.markers.map(marker => ({ ...marker, ...point(marker.x,marker.z) }));
+  const label = point(state.section.label_x,state.section.label_z);
+  const connections = state.connections.map(connection => {
+    const next = { ...connection };
+    if (connection.section_a_id === sectionId) Object.assign(next, Object.fromEntries(Object.entries(point(connection.x_a,connection.z_a)).map(([axis,value]) => [`${axis}_a`,value])));
+    if (connection.section_b_id === sectionId) Object.assign(next, Object.fromEntries(Object.entries(point(connection.x_b,connection.z_b)).map(([axis,value]) => [`${axis}_b`,value])));
+    return next;
+  });
+  if (rotation % 180 !== 0) [bounds.x,bounds.z] = [bounds.z,bounds.x];
+  const chunks = encodeSectionChunks(blocks, entities);
+  db.prepare('DELETE FROM section_chunks WHERE section_id=?').run(sectionId);
+  const insertChunk = db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,1,?)');
+  for (const chunk of chunks) insertChunk.run(sectionId,chunk.cx,chunk.cy,chunk.cz,chunk.compressed);
+  db.prepare('UPDATE sections SET bounds_json=?,label_x=?,label_z=? WHERE id=?').run(JSON.stringify(bounds),label.x,label.z,sectionId);
+  const updateMarker = db.prepare('UPDATE markers SET x=?,z=? WHERE id=?');
+  for (const marker of markers) updateMarker.run(marker.x,marker.z,marker.id);
+  const updateConnection = db.prepare('UPDATE section_connections SET x_a=?,z_a=?,x_b=?,z_b=? WHERE id=?');
+  for (const connection of connections) updateConnection.run(connection.x_a,connection.z_a,connection.x_b,connection.z_b,connection.id);
+  validateSectionLayout(db, sectionId, db.prepare('SELECT placement_x FROM sections WHERE id=?').get(sectionId).placement_x, db.prepare('SELECT placement_z FROM sections WHERE id=?').get(sectionId).placement_z);
+  return state;
+}
+
+/** Rotate or mirror all block geometry and attached anchors inside one section. */
+export function transformSection(db, { sectionId, rotation = 0, flipHorizontal = false, flipVertical = false }, expectedRevision, inverse = false) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  if (![0,90,180,270].includes(rotation) || typeof flipHorizontal !== 'boolean' || typeof flipVertical !== 'boolean') throw new Error('Choose a quarter-turn rotation and horizontal or vertical flips.');
+  const tx = db.transaction(() => {
+    const before = applySectionTransform(db, sectionId, { rotation, flipHorizontal, flipVertical }, inverse);
+    advanceProjectRevision(db, expectedRevision);
+    return before;
+  });
+  const before = tx();
+  return { sectionId, rotation, flipHorizontal, flipVertical, inverse, revision: expectedRevision + 1 };
+}
+
+export function restoreSectionTransform(db, command, direction, expectedRevision) {
+  if (direction !== 'undo' && direction !== 'redo') throw new Error('Choose undo or redo.');
+  return transformSection(db, command, expectedRevision, direction === 'undo');
+}
+
 /** Persist one decoded schematic as an independent section in a shared schematic coordinate frame. */
 export function importSchematicSection(db, schematic, { floorId = null, floorName = 'Floor 0', sectionName = 'Imported section' } = {}) {
   if (!Array.isArray(schematic?.regions) || !schematic.regions.length) throw new Error('Litematic contains no regions to import');

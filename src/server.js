@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir, access } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
+import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, transformSection, restoreSectionTransform, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
 import { createProjectBackup, restoreProjectBackup } from './backup-service.js';
@@ -34,6 +34,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const markerTypeHistory = new Map();
   const blockHistory = new Map();
   const sectionHistory = new Map();
+  const sectionTransformHistory = new Map();
   const connectionHistory = new Map();
   const renderSettingsHistory = new Map();
   const lifecycleHistory = new Map();
@@ -143,7 +144,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     res.status(404).end();
   });
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); sectionTransformHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -419,6 +420,37 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
     } catch (error) {
       const status = /another editor tab|does not exist|collision|history/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  app.put('/api/project/sections/:id/transform', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = transformSection(db, { sectionId: req.params.id, rotation: req.body.rotation, flipHorizontal: req.body.flipHorizontal, flipVertical: req.body.flipVertical }, req.body.expectedRevision);
+      const token = getSession(req).token, history = sectionTransformHistory.get(token) ?? { undo: [], redo: [] };
+      history.undo.push({ sectionId: req.params.id, rotation: req.body.rotation, flipHorizontal: req.body.flipHorizontal, flipVertical: req.body.flipVertical });
+      if (history.undo.length > 50) history.undo.shift(); history.redo = []; sectionTransformHistory.set(token, history);
+      try { await generation.save(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|collision|section/i.test(error.message) ? 409 : 400;
+      res.status(status).json({ error: error.message });
+    } finally { db.close(); }
+  });
+  for (const direction of ['undo', 'redo']) app.post(`/api/project/sections/transform/${direction}`, requireEditor, requireSameOrigin, async (req, res) => {
+    const token = getSession(req).token, history = sectionTransformHistory.get(token) ?? { undo: [], redo: [] };
+    const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'], command = source.at(-1);
+    if (!command) return res.status(409).json({ error: `There is no section transform to ${direction}.` });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = restoreSectionTransform(db, command, direction, req.body.expectedRevision);
+      source.pop(); target.push(command); sectionTransformHistory.set(token, history);
+      try { await generation.save(snapshotProject(db)); return res.json({ ...result, saved: true, status: generation.queue.status }); }
+      catch (error) { return res.status(202).json({ ...result, saved: false, warning: error.message, status: generation.queue.status }); }
+    } catch (error) {
+      const status = /another editor tab|does not exist|collision|history|section/i.test(error.message) ? 409 : 400;
       res.status(status).json({ error: error.message });
     } finally { db.close(); }
   });

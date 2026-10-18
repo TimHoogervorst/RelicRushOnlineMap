@@ -361,6 +361,29 @@ async function sectionLayoutHistory(direction) {
 }
 document.querySelector('#section-layout-undo').addEventListener('click', () => void sectionLayoutHistory('undo'));
 document.querySelector('#section-layout-redo').addEventListener('click', () => void sectionLayoutHistory('redo'));
+async function submitSectionTransform(direction = null) {
+  const section = selectedLayoutSection(); if (!section) return;
+  const status = document.querySelector('#section-transform-status');
+  const path = direction ? `/api/project/sections/transform/${direction}` : `/api/project/sections/${encodeURIComponent(section.id)}/transform`;
+  const body = direction ? { expectedRevision: projectRevision } : {
+    expectedRevision: projectRevision,
+    rotation: Number(document.querySelector('#section-rotation').value),
+    flipHorizontal: document.querySelector('#section-flip-horizontal').checked,
+    flipVertical: document.querySelector('#section-flip-vertical').checked
+  };
+  status.textContent = direction ? `Section transform ${direction}…` : 'Transforming the whole section and regenerating the map…';
+  const response = await fetch(path, { method: direction ? 'POST' : 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const result = await response.json();
+  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
+  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+  if (!result.saved) { status.textContent = `Transform retained; ${result.warning}. Use Save to retry.`; return; }
+  status.textContent = direction ? `Section transform ${direction} complete.` : 'Section transformed.';
+  if (!direction) { document.querySelector('#section-rotation').value = '0'; document.querySelector('#section-flip-horizontal').checked = false; document.querySelector('#section-flip-vertical').checked = false; }
+  await loadFloor(floorManifest.id); await refreshSaveStatus();
+}
+document.querySelector('#section-transform-apply').addEventListener('click', () => void submitSectionTransform());
+document.querySelector('#section-transform-undo').addEventListener('click', () => void submitSectionTransform('undo'));
+document.querySelector('#section-transform-redo').addEventListener('click', () => void submitSectionTransform('redo'));
 for (const id of ['section-x', 'section-z']) document.querySelector(`#${id}`).addEventListener('input', () => scheduleLayoutPreview());
 function renderSelection() {
   const svg = document.querySelector('#block-selection');
