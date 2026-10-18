@@ -233,20 +233,23 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     const x = Math.floor(px / pixelSize), z = depth - 1 - Math.floor(py / pixelSize);
     heightGrid[z][x] = Math.max(heightGrid[z][x] ?? -Infinity, surface);
   }
-  const neighborhood = (x, z) => [[x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]]
-    .filter(([nx, nz]) => nx >= 0 && nx < width && nz >= 0 && nz < depth && heightGrid[nz][nx] !== null)
-    .map(([nx, nz]) => heightGrid[nz][nx]);
+  const verticalSpan = Number.isFinite(lowY) && Number.isFinite(highY) ? Math.max(0, highY - lowY) : 0;
+  const totalLayerContrast = Math.min(0.1, verticalSpan * heightShadePerBlock);
+  const sigmoidMin = 1 / (1 + Math.exp(3));
+  const sigmoidMax = 1 / (1 + Math.exp(-3));
+  const layerShade = surfaceY => {
+    if (!verticalSpan || !totalLayerContrast) return 1;
+    const position = Math.max(0, Math.min(1, (surfaceY - lowY) / verticalSpan));
+    const sigmoid = 1 / (1 + Math.exp(-6 * (position - 0.5)));
+    const normalized = (sigmoid - sigmoidMin) / (sigmoidMax - sigmoidMin);
+    return 1 + totalLayerContrast * (0.5 - normalized);
+  };
   for (let py = 0; py < outHeight; py++) for (let px = 0; px < outWidth; px++) {
     const at = py * outWidth + px, dest = at * 4;
     if (!raw[dest + 3]) continue;
     const x = Math.floor(px / pixelSize), z = depth - 1 - Math.floor(py / pixelSize), height = heightGrid[z][x];
     if (height === null) continue;
-    const adjacent = neighborhood(x, z);
-    const localDelta = adjacent.length ? height - adjacent.reduce((sum, value) => sum + value, 0) / adjacent.length : 0;
-    let shade = Math.max(.94, Math.min(1.06, 1 + localDelta * heightShadePerBlock));
-    const edge = neighborhood(x, z).some(value => Math.abs(value - height) >= 1) &&
-      (px % pixelSize === 0 || px % pixelSize === pixelSize - 1 || py % pixelSize === 0 || py % pixelSize === pixelSize - 1);
-    if (edge) shade *= .96;
+    const shade = layerShade(height);
     raw[dest] = Math.round(raw[dest] * shade); raw[dest + 1] = Math.round(raw[dest + 1] * shade); raw[dest + 2] = Math.round(raw[dest + 2] * shade);
   }
   await sharp(raw, { raw: { width: outWidth, height: outHeight, channels: 4 } }).png().toFile(output);
@@ -259,7 +262,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),
-    renderer: { name: 'relic-ortho-model-rasterizer', version: 1, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
+    renderer: { name: 'relic-ortho-model-rasterizer', version: 2, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
   };
 }
 

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
 
-const GENERATOR_VERSION = '4';
+const GENERATOR_VERSION = '5';
 const DEFAULT_HIDDEN_BLOCKS = new Set(['minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:decorated_pot', 'minecraft:player_head']);
 
 function canonicalJson(value) {
