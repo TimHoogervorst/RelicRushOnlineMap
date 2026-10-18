@@ -2,7 +2,7 @@ import express from 'express';
 import { Worker } from 'node:worker_threads';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, readdir, access } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
 import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
@@ -60,13 +60,14 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     job.once('exit', code => { if (code !== 0) reject(new Error(`Asset extraction worker exited (${code}).`)); });
   }));
   let workerState = { ready: false, error: null };
-  const generation = createGenerationService({ dataDir, renderer: renderer ?? { render: renderInWorker }, assetsDir: process.env.MINECRAFT_ASSETS ? path.resolve(process.env.MINECRAFT_ASSETS) : path.join(dataDir, 'assets', 'minecraft') });
+  const minecraftAssetsDir = process.env.MINECRAFT_ASSETS ? path.resolve(process.env.MINECRAFT_ASSETS) : path.join(dataDir, 'assets', 'minecraft');
+  const generation = createGenerationService({ dataDir, renderer: renderer ?? { render: renderInWorker }, assetsDir: minecraftAssetsDir });
   let activeWorker;
   let assetSetupBusy = false;
   const startWorker = (forceRender = false) => {
     if (!initializeWorker) return;
     workerState = { ready: false, warning: null, rendered: Boolean(workerState.rendered) };
-    activeWorker = new Worker(new URL('./seed-worker.js', import.meta.url), { workerData: { dataDir, fixturePath: path.resolve(process.env.STARTING_FIXTURE ?? path.join(root, 'schematics', 'Start 0F.litematic')), assetsDir: process.env.MINECRAFT_ASSETS ? path.resolve(process.env.MINECRAFT_ASSETS) : path.join(dataDir, 'assets', 'minecraft'), clientJar: process.env.MINECRAFT_CLIENT_JAR ?? (process.env.APPDATA ? path.join(process.env.APPDATA, 'PrismLauncher', 'libraries', 'com', 'mojang', 'minecraft', '26.3', 'minecraft-26.3-client.jar') : '/seed-assets/minecraft-client.jar'), forceRender } });
+    activeWorker = new Worker(new URL('./seed-worker.js', import.meta.url), { workerData: { dataDir, fixturePath: path.resolve(process.env.STARTING_FIXTURE ?? path.join(root, 'schematics', 'Start 0F.litematic')), assetsDir: minecraftAssetsDir, clientJar: process.env.MINECRAFT_CLIENT_JAR ?? (process.env.APPDATA ? path.join(process.env.APPDATA, 'PrismLauncher', 'libraries', 'com', 'mojang', 'minecraft', '26.3', 'minecraft-26.3-client.jar') : '/seed-assets/minecraft-client.jar'), forceRender } });
     activeWorker.on('message', value => { workerState = value; });
     activeWorker.on('error', error => { workerState = { ready: false, error: error.message }; });
     activeWorker.on('exit', code => { if (code && !workerState.error) workerState = { ready: false, error: `Initialization worker exited (${code})` }; });
@@ -88,6 +89,59 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionDurationMs / 1000)}${secureCookies || req.secure ? '; Secure' : ''}`).json({ authenticated: true });
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
+  const itemTextureRoot = path.join(minecraftAssetsDir, 'textures', 'item');
+  const itemIconFiles = async (directory = itemTextureRoot, prefix = '') => {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    return (await Promise.all(entries.map(entry => entry.isDirectory()
+      ? itemIconFiles(path.join(directory, entry.name), `${prefix}${entry.name}/`)
+      : entry.isFile() && entry.name.endsWith('.png') ? [`minecraft:${prefix}${entry.name.slice(0, -4)}`] : []))).flat();
+  };
+  const itemModelIds = async (directory = path.join(minecraftAssetsDir, 'models', 'item'), prefix = '') => {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    return (await Promise.all(entries.map(entry => entry.isDirectory()
+      ? itemModelIds(path.join(directory, entry.name), `${prefix}${entry.name}/`)
+      : entry.isFile() && entry.name.endsWith('.json') ? [`minecraft:${prefix}${entry.name.slice(0, -5)}`] : []))).flat();
+  };
+  app.get('/api/item-icons', async (_req, res) => {
+    try {
+      const ids = new Set(await itemIconFiles());
+      for (const id of await itemModelIds()) ids.add(id);
+      res.set('Cache-Control', 'no-cache').json([...ids].sort().map(id => ({ id, name: id.slice('minecraft:'.length).replaceAll('_', ' ') })));
+    }
+    catch { res.status(503).json({ error: 'Minecraft item textures are not available. Re-run Minecraft asset setup in Edit.' }); }
+  });
+  app.get('/api/item-icon', async (req, res) => {
+    const id = typeof req.query.id === 'string' ? req.query.id : '';
+    const relative = id.startsWith('minecraft:') ? id.slice('minecraft:'.length) : '';
+    if (!/^[a-z0-9_./-]+$/.test(relative) || relative.split('/').some(part => part === '..' || part === '.')) return res.status(400).end();
+    const roots = [path.join(dataDir, 'assets', 'resource-pack'), minecraftAssetsDir];
+    const resolveTexture = async (modelPath, seen = new Set()) => {
+      if (seen.size > 8 || seen.has(modelPath)) return null;
+      seen.add(modelPath);
+      let model;
+      try { model = JSON.parse(await readFile(path.join(roots[0], 'models', `${modelPath}.json`), 'utf8')); }
+      catch { try { model = JSON.parse(await readFile(path.join(roots[1], 'models', `${modelPath}.json`), 'utf8')); } catch { return null; } }
+      const textures = model.textures ?? {};
+      const pick = key => {
+        let value = textures[key], count = 0;
+        while (typeof value === 'string' && value.startsWith('#') && count++ < 8) value = textures[value.slice(1)];
+        return typeof value === 'string' && !value.startsWith('#') ? value : null;
+      };
+      for (const key of ['layer0','all','top','side','particle']) { const texture = pick(key); if (texture) return texture; }
+      if (typeof model.parent === 'string' && model.parent.startsWith('minecraft:')) return resolveTexture(model.parent.slice('minecraft:'.length), seen);
+      return null;
+    };
+    const texture = await resolveTexture(`item/${relative}`);
+    const candidates = [];
+    if (texture) candidates.push(path.resolve(roots[0], 'textures', `${texture}.png`), path.resolve(roots[1], 'textures', `${texture}.png`));
+    candidates.push(path.resolve(roots[0], 'textures', 'item', `${relative}.png`), path.resolve(roots[1], 'textures', 'item', `${relative}.png`));
+    for (const candidate of candidates) {
+      const root = candidate.startsWith(`${path.resolve(roots[0])}${path.sep}`) ? path.resolve(roots[0]) : path.resolve(roots[1]);
+      if (!candidate.startsWith(`${root}${path.sep}`)) continue;
+      try { await access(candidate); return res.set('Cache-Control', 'no-cache').type('png').send(await readFile(candidate)); } catch { /* try the next Minecraft texture source */ }
+    }
+    res.status(404).end();
+  });
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
     const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();

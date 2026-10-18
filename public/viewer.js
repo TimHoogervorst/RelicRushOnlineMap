@@ -124,15 +124,25 @@ let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSec
 let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
 let layoutPreviewTimer = null, layoutConflicts = [];
 const builtInMarkerTypes = [
-  { id: 'chest', name: 'Chests', color: '#d89032', icon: 'chest', builtIn: true },
-  { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'relic', builtIn: true },
-  { id: 'shop', name: 'Shops', color: '#55ae70', icon: 'shop', builtIn: true },
-  { id: 'stairs', name: 'Stairs', color: '#57a9d6', icon: 'stairs', builtIn: true },
-  { id: 'other', name: 'Other', color: '#aab3ba', icon: 'other', builtIn: true }
+  { id: 'chest', name: 'Chests', color: '#d89032', icon: 'minecraft:chest', builtIn: true },
+  { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'minecraft:diamond', builtIn: true },
+  { id: 'shop', name: 'Shops', color: '#55ae70', icon: 'minecraft:emerald', builtIn: true },
+  { id: 'stairs', name: 'Stairs', color: '#57a9d6', icon: 'minecraft:oak_stairs', builtIn: true },
+  { id: 'other', name: 'Other', color: '#aab3ba', icon: 'minecraft:compass', builtIn: true }
 ];
 const markerTypes = () => floorManifest?.markerTypes ?? builtInMarkerTypes;
 const markerType = id => markerTypes().find(type => type.id === id) ?? builtInMarkerTypes.find(type => type.id === id) ?? builtInMarkerTypes.at(-1);
-const markerIcon = id => `/icons/${markerType(id).icon}.svg`;
+const legacyIcons = { chest: 'minecraft:chest', relic: 'minecraft:diamond', shop: 'minecraft:emerald', stairs: 'minecraft:oak_stairs', other: 'minecraft:compass' };
+const inventoryIcon = icon => {
+  const normalized = legacyIcons[icon] ?? icon;
+  return typeof normalized === 'string' && normalized.startsWith('minecraft:') ? `/api/item-icon?id=${encodeURIComponent(normalized)}` : `/icons/${encodeURIComponent(normalized)}.svg`;
+};
+let minecraftItemIcons = [];
+fetch('/api/item-icons').then(response => response.ok ? response.json() : []).then(items => {
+  minecraftItemIcons = Array.isArray(items) ? items : [];
+  const list = document.querySelector('#minecraft-item-icons');
+  if (list) list.replaceChildren(...minecraftItemIcons.map(item => new Option(item.name, item.id)));
+}).catch(() => {});
 const markerTitle = id => markerType(id).name;
 function setSaveStatus(state) {
   const target = document.querySelector('#save-status');
@@ -565,7 +575,10 @@ function renderConnections() {
     line.dataset.connectionId = connection.id; svg.append(line);
     for (const [x, y] of [[ax, ay], [bx, by]]) {
       const endpoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      endpoint.setAttribute('cx', String(x)); endpoint.setAttribute('cy', String(y)); endpoint.setAttribute('r', '5'); endpoint.setAttribute('class', 'section-connection-endpoint'); svg.append(endpoint);
+      endpoint.setAttribute('cx', String(x)); endpoint.setAttribute('cy', String(y)); endpoint.setAttribute('r', '10'); endpoint.setAttribute('class', 'section-connection-endpoint'); svg.append(endpoint);
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+      icon.setAttribute('x', String(x - 7)); icon.setAttribute('y', String(y - 7)); icon.setAttribute('width', '14'); icon.setAttribute('height', '14'); icon.setAttribute('href', inventoryIcon(connection.icon || 'minecraft:oak_stairs')); icon.setAttribute('class', 'section-connection-icon'); svg.append(icon);
+      icon.addEventListener('error', () => icon.setAttribute('href', '/icons/stairs.svg'), { once: true });
     }
     if (connection.label) {
       const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -586,7 +599,7 @@ function renderConnections() {
   document.querySelector('#connection-delete').hidden = !selected;
   if (selected && document.activeElement !== form.querySelector('input:focus')) {
     document.querySelector('#connection-a').value = selected.sectionAId; document.querySelector('#connection-b').value = selected.sectionBId;
-    for (const [id, value] of [['connection-x-a', selected.xA], ['connection-z-a', selected.zA], ['connection-x-b', selected.xB], ['connection-z-b', selected.zB], ['connection-label', selected.label]]) document.querySelector(`#${id}`).value = value;
+    for (const [id, value] of [['connection-x-a', selected.xA], ['connection-z-a', selected.zA], ['connection-x-b', selected.xB], ['connection-z-b', selected.zB], ['connection-label', selected.label], ['connection-icon', selected.icon || 'minecraft:oak_stairs']]) document.querySelector(`#${id}`).value = value;
   }
   if (!selected) {
     if (sections.length > 1 && document.querySelector('#connection-a').value === document.querySelector('#connection-b').value) document.querySelector('#connection-b').selectedIndex = 1;
@@ -606,13 +619,24 @@ function renderMarkers() {
     button.type = 'button'; button.className = 'map-marker'; button.dataset.markerId = marker.id;
     button.dataset.type = marker.type;
     button.style.left = `${marker.x * pixels}px`; button.style.top = `${marker.z * pixels}px`;
-    button.style.backgroundImage = `url("${markerIcon(marker.type)}")`;
+    const type = markerType(marker.type);
+    const icon = document.createElement('img'); icon.alt = ''; icon.src = inventoryIcon(marker.icon || type.icon);
+    icon.addEventListener('error', () => { icon.src = `/icons/${legacyIcons[marker.type]?.replace('minecraft:', '') ?? marker.type}.svg`; }, { once: true });
+    button.append(icon);
     button.style.setProperty('--marker-color', markerType(marker.type).color);
     button.style.borderColor = markerType(marker.type).color;
-    button.setAttribute('aria-label', `${markerTitle(marker.type)}: ${marker.name}`);
+    button.setAttribute('aria-label', `${marker.name}, ${markerTitle(marker.type)}`);
     button.hidden = !editorOpen && highlightedMarker !== marker.id && !readMarkerVisibility(floorManifest.id, marker.type);
-    button.title = marker.name;
     button.classList.toggle('highlighted', highlightedMarker === marker.id);
+    const tooltip = document.querySelector('#marker-tooltip');
+    const showTooltip = () => {
+      tooltip.replaceChildren();
+      const strong = document.createElement('strong'); strong.textContent = marker.name;
+      const kind = document.createElement('span'); kind.textContent = markerTitle(marker.type);
+      tooltip.append(strong, kind); tooltip.style.left = `${marker.x * pixels}px`; tooltip.style.top = `${marker.z * pixels - 22}px`; tooltip.hidden = false;
+    };
+    button.addEventListener('pointerenter', showTooltip); button.addEventListener('pointerleave', () => { tooltip.hidden = true; });
+    button.addEventListener('focus', showTooltip); button.addEventListener('blur', () => { tooltip.hidden = true; });
     button.addEventListener('click', event => {
       event.stopPropagation();
       if (editorOpen) { populateMarkerForm(marker); return; }
@@ -675,7 +699,7 @@ function renderMarkers() {
     summary.append(check, ` ${type.name}`); details.append(summary);
     for (const marker of typed) {
       const entry = document.createElement('button'); entry.type = 'button'; entry.className = 'legend-entry';
-      const icon = document.createElement('img'); icon.src = markerIcon(type.id); icon.alt = '';
+      const icon = document.createElement('img'); icon.src = inventoryIcon(type.icon); icon.alt = '';
       icon.style.borderColor = type.color;
       icon.style.border = `2px solid ${type.color}`;
       entry.append(icon, document.createTextNode(marker.name));
@@ -690,10 +714,10 @@ function renderMarkers() {
   if (!groups.childElementCount) groups.innerHTML = '<p>No markers on this floor.</p>';
 }
 function connectionFormValue() {
-  return { sectionAId: document.querySelector('#connection-a').value, xA: Number(document.querySelector('#connection-x-a').value), zA: Number(document.querySelector('#connection-z-a').value), sectionBId: document.querySelector('#connection-b').value, xB: Number(document.querySelector('#connection-x-b').value), zB: Number(document.querySelector('#connection-z-b').value), label: document.querySelector('#connection-label').value };
+  return { sectionAId: document.querySelector('#connection-a').value, xA: Number(document.querySelector('#connection-x-a').value), zA: Number(document.querySelector('#connection-z-a').value), sectionBId: document.querySelector('#connection-b').value, xB: Number(document.querySelector('#connection-x-b').value), zB: Number(document.querySelector('#connection-z-b').value), label: document.querySelector('#connection-label').value, icon: document.querySelector('#connection-icon').value || 'minecraft:oak_stairs' };
 }
 document.querySelector('#connection-select').addEventListener('change', renderConnections);
-document.querySelector('#connection-new').addEventListener('click', () => { document.querySelector('#connection-select').value = ''; document.querySelector('#connection-delete').hidden = true; document.querySelector('#connection-x-a').value = '0.5'; document.querySelector('#connection-z-a').value = '0.5'; document.querySelector('#connection-x-b').value = '0.5'; document.querySelector('#connection-z-b').value = '0.5'; document.querySelector('#connection-label').value = ''; if (floorManifest?.sections.length > 1) { document.querySelector('#connection-a').selectedIndex = 0; document.querySelector('#connection-b').selectedIndex = 1; } });
+document.querySelector('#connection-new').addEventListener('click', () => { document.querySelector('#connection-select').value = ''; document.querySelector('#connection-delete').hidden = true; document.querySelector('#connection-x-a').value = '0.5'; document.querySelector('#connection-z-a').value = '0.5'; document.querySelector('#connection-x-b').value = '0.5'; document.querySelector('#connection-z-b').value = '0.5'; document.querySelector('#connection-label').value = ''; document.querySelector('#connection-icon').value = 'minecraft:oak_stairs'; if (floorManifest?.sections.length > 1) { document.querySelector('#connection-a').selectedIndex = 0; document.querySelector('#connection-b').selectedIndex = 1; } });
 document.querySelector('#connection-form').addEventListener('submit', async event => {
   event.preventDefault();
   const status = document.querySelector('#connection-status'), id = document.querySelector('#connection-select').value;
@@ -751,7 +775,7 @@ function renderCustomMarkerTypeEditor() {
   const current = customTypes.find(type => type.id === select.value);
   document.querySelector('#custom-marker-type-name').value = current?.name ?? '';
   document.querySelector('#custom-marker-type-color').value = current?.color ?? '#d89032';
-  document.querySelector('#custom-marker-type-icon').value = current?.icon ?? 'other';
+  document.querySelector('#custom-marker-type-icon').value = legacyIcons[current?.icon] ?? current?.icon ?? 'minecraft:compass';
   document.querySelector('#custom-marker-type-delete').hidden = !current;
   const replacementLabel = document.querySelector('#custom-marker-type-replacement-label');
   replacementLabel.hidden = !current;
@@ -844,6 +868,7 @@ function populateMarkerForm(marker = null) {
   document.querySelector('#marker-type').value = marker?.type ?? 'chest';
   document.querySelector('#marker-name').value = marker?.name ?? '';
   document.querySelector('#marker-description').value = marker?.description ?? '';
+  document.querySelector('#marker-icon').value = marker?.icon ?? '';
   const section = floorManifest?.sections.find(item => item.id === marker?.sectionId) ?? floorManifest?.sections[0];
   if (section) document.querySelector('#marker-section').value = section.id;
   document.querySelector('#marker-x').value = marker?.localX ?? 0.5;
@@ -904,7 +929,7 @@ document.querySelector('#marker-section').addEventListener('change', event => {
 });
 async function persistMarker(id = document.querySelector('#marker-id').value, preserveDisplayedPosition = false) {
   const status = document.querySelector('#marker-status');
-  const marker = { type: document.querySelector('#marker-type').value, name: document.querySelector('#marker-name').value, description: document.querySelector('#marker-description').value, sectionId: document.querySelector('#marker-section').value, x: Number(document.querySelector('#marker-x').value), z: Number(document.querySelector('#marker-z').value) };
+  const marker = { type: document.querySelector('#marker-type').value, name: document.querySelector('#marker-name').value, description: document.querySelector('#marker-description').value, icon: document.querySelector('#marker-icon').value || null, sectionId: document.querySelector('#marker-section').value, x: Number(document.querySelector('#marker-x').value), z: Number(document.querySelector('#marker-z').value) };
   status.textContent = 'Saving marker…';
   try {
     const keepDisplayedPosition = Boolean(id && marker.sectionId !== initialMarkerSection && document.querySelector('#preserve-marker-position').checked);

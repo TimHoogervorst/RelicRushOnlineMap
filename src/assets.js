@@ -16,7 +16,7 @@ function zipEntries(jar, maxEntries = 100000, maxEntryBytes = 16 * 1024 * 1024, 
     const flags = jar.readUInt16LE(offset + 8), method = jar.readUInt16LE(offset + 10), compressedSize = jar.readUInt32LE(offset + 20), size = jar.readUInt32LE(offset + 24);
     const nameLength = jar.readUInt16LE(offset + 28), extraLength = jar.readUInt16LE(offset + 30), commentLength = jar.readUInt16LE(offset + 32);
     const name = jar.toString('utf8', offset + 46, offset + 46 + nameLength), localOffset = jar.readUInt32LE(offset + 42);
-    if ((name === 'version.json' || resourcePack && name === 'pack.mcmeta' || /^assets\/minecraft\/(blockstates\/|models\/|textures\/block\/)/.test(name)) && !name.endsWith('/')) {
+    if ((name === 'version.json' || resourcePack && name === 'pack.mcmeta' || /^assets\/minecraft\/(blockstates\/|models\/(block|item)\/|textures\/(block|item)\/)/.test(name)) && !name.endsWith('/')) {
       if (!/^[A-Za-z0-9_./-]+$/.test(name) || name.split('/').some(part => part === '..' || part === '.')) throw new Error(`Unsafe resource path in asset archive: ${name}`);
       if (names.has(name)) throw new Error(`Duplicate resource path in asset archive: ${name}`);
       names.add(name);
@@ -83,7 +83,7 @@ export async function extractMatchingAssets(jarPath, outputDir, expectedVersion 
   const versionBytes = archive.subarray(versionEntry.dataStart, versionEntry.dataStart + versionEntry.compressedSize);
   const versionJson = JSON.parse((versionEntry.method === 0 ? versionBytes : inflateRawSync(versionBytes, { maxOutputLength: 64 * 1024 })).toString('utf8'));
   if (versionJson.id !== expectedVersion || versionJson.world_version !== 5023) throw new Error(`Expected Minecraft ${expectedVersion} / world version 5023 assets; received ${versionJson.id} / ${versionJson.world_version}`);
-  const required = ['blockstates/stone.json', 'models/block/stone.json', 'textures/block/stone.png'];
+  const required = ['blockstates/stone.json', 'models/block/stone.json', 'textures/block/stone.png', 'textures/item/diamond.png'];
   for (const item of required) if (!entries.some(entry => entry.name === item)) throw new Error(`Minecraft asset archive is missing ${item}`);
   const unique = randomUUID();
   const stage = `${outputDir}.staging-${unique}`;
@@ -100,7 +100,7 @@ export async function extractMatchingAssets(jarPath, outputDir, expectedVersion 
       await mkdir(path.dirname(output), { recursive: true });
       await writeFile(output, data, { mode: 0o600 });
     }
-    const metadata = { minecraftVersion: versionJson.id, worldVersion: versionJson.world_version, sourceName: path.basename(jarPath), sha256: createHash('sha256').update(archive).digest('hex'), blockStates: entries.filter(e => e.name.startsWith('blockstates/')).length, blockModels: entries.filter(e => e.name.startsWith('models/block/')).length, blockTextures: entries.filter(e => e.name.startsWith('textures/block/')).length };
+    const metadata = { minecraftVersion: versionJson.id, worldVersion: versionJson.world_version, sourceName: path.basename(jarPath), sha256: createHash('sha256').update(archive).digest('hex'), blockStates: entries.filter(e => e.name.startsWith('blockstates/')).length, blockModels: entries.filter(e => e.name.startsWith('models/block/')).length, blockTextures: entries.filter(e => e.name.startsWith('textures/block/')).length, itemTextures: entries.filter(e => e.name.startsWith('textures/item/')).length };
     await writeFile(path.join(stage, 'asset-source.json'), JSON.stringify(metadata, null, 2), { mode: 0o600 });
     await chmod(stage, 0o700);
     const previous = `${outputDir}.previous-${unique}`;

@@ -55,9 +55,9 @@ export function openProject(path) {
     CREATE TABLE IF NOT EXISTS sections (id TEXT PRIMARY KEY, floor_id TEXT NOT NULL REFERENCES floors(id), name TEXT NOT NULL, bounds_json TEXT NOT NULL, placement_x INTEGER NOT NULL DEFAULT 0, placement_z INTEGER NOT NULL DEFAULT 0, label_x REAL NOT NULL DEFAULT 0, label_z REAL NOT NULL DEFAULT 0, provenance_json TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS section_render_settings (section_id TEXT PRIMARY KEY REFERENCES sections(id) ON DELETE CASCADE, settings_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_chunks (section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE, chunk_x INTEGER NOT NULL, chunk_y INTEGER NOT NULL, chunk_z INTEGER NOT NULL, format_version INTEGER NOT NULL, blob BLOB NOT NULL, PRIMARY KEY(section_id, chunk_x, chunk_y, chunk_z));
-    CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id));
+    CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id), icon TEXT);
     CREATE TABLE IF NOT EXISTS custom_marker_types (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS section_connections (id TEXT PRIMARY KEY, section_a_id TEXT NOT NULL REFERENCES sections(id), x_a REAL NOT NULL, z_a REAL NOT NULL, section_b_id TEXT NOT NULL REFERENCES sections(id), x_b REAL NOT NULL, z_b REAL NOT NULL, label TEXT NOT NULL DEFAULT '', CHECK(section_a_id <> section_b_id));
+    CREATE TABLE IF NOT EXISTS section_connections (id TEXT PRIMARY KEY, section_a_id TEXT NOT NULL REFERENCES sections(id), x_a REAL NOT NULL, z_a REAL NOT NULL, section_b_id TEXT NOT NULL REFERENCES sections(id), x_b REAL NOT NULL, z_b REAL NOT NULL, label TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT 'minecraft:oak_stairs', CHECK(section_a_id <> section_b_id));
     CREATE TRIGGER IF NOT EXISTS section_connection_same_floor_insert BEFORE INSERT ON section_connections
       WHEN (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_b_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) <> (SELECT floor_id FROM sections WHERE id=NEW.section_b_id)
       BEGIN SELECT RAISE(ABORT, 'Section connections must join sections on the same floor.'); END;
@@ -72,6 +72,10 @@ export function openProject(path) {
   if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
   if (!sectionColumns.has('label_z')) db.exec('ALTER TABLE sections ADD COLUMN label_z REAL NOT NULL DEFAULT 0');
   if (!sectionColumns.has('sort_order')) db.exec('ALTER TABLE sections ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  const markerColumns = new Set(db.pragma('table_info(markers)').map(column => column.name));
+  if (!markerColumns.has('icon')) db.exec('ALTER TABLE markers ADD COLUMN icon TEXT');
+  const connectionColumns = new Set(db.pragma('table_info(section_connections)').map(column => column.name));
+  if (!connectionColumns.has('icon')) db.exec("ALTER TABLE section_connections ADD COLUMN icon TEXT NOT NULL DEFAULT 'minecraft:oak_stairs'");
   db.prepare("INSERT OR IGNORE INTO project_meta(key,value) VALUES('revision','0')").run();
   return db;
 }
@@ -239,7 +243,7 @@ export function deleteFloorLifecycle(db, id, resolution, expectedRevision) {
       }
       for (const link of internalConnections) db.prepare('DELETE FROM section_connections WHERE id=?').run(link.id);
       for (const sectionId of sections) db.prepare('UPDATE sections SET floor_id=? WHERE id=?').run(destination, sectionId);
-      for (const link of internalConnections) db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label) VALUES(?,?,?,?,?,?,?,?)').run(link.id,link.section_a_id,link.x_a,link.z_a,link.section_b_id,link.x_b,link.z_b,link.label);
+      for (const link of internalConnections) db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label,icon) VALUES(?,?,?,?,?,?,?,?,?)').run(link.id,link.section_a_id,link.x_a,link.z_a,link.section_b_id,link.x_b,link.z_b,link.label,link.icon ?? 'minecraft:oak_stairs');
     }
     if (db.prepare('SELECT 1 FROM sections WHERE floor_id=?').get(id)) throw new Error('Resolve all sections before deleting this floor.');
     const order = db.prepare('SELECT sort_order FROM floors WHERE id=?').get(id).sort_order;
@@ -256,13 +260,12 @@ export function advanceProjectRevision(db, expectedRevision = projectRevision(db
 }
 
 const BUILT_IN_MARKER_TYPES = new Set(['chest', 'relic', 'shop', 'stairs', 'other']);
-const CUSTOM_MARKER_ICONS = new Set(['chest', 'relic', 'shop', 'other']);
 export const BUILT_IN_MARKER_TYPE_DATA = [
-  { id: 'chest', name: 'Chests', color: '#d89032', icon: 'chest', builtIn: true },
-  { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'relic', builtIn: true },
-  { id: 'shop', name: 'Shops', color: '#55ae70', icon: 'shop', builtIn: true },
-  { id: 'stairs', name: 'Stairs', color: '#57a9d6', icon: 'stairs', builtIn: true },
-  { id: 'other', name: 'Other', color: '#aab3ba', icon: 'other', builtIn: true }
+  { id: 'chest', name: 'Chests', color: '#d89032', icon: 'minecraft:chest', builtIn: true },
+  { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'minecraft:diamond', builtIn: true },
+  { id: 'shop', name: 'Shops', color: '#55ae70', icon: 'minecraft:emerald', builtIn: true },
+  { id: 'stairs', name: 'Stairs', color: '#57a9d6', icon: 'minecraft:oak_stairs', builtIn: true },
+  { id: 'other', name: 'Other', color: '#aab3ba', icon: 'minecraft:compass', builtIn: true }
 ];
 
 export function listMarkerTypes(db) {
@@ -273,7 +276,8 @@ function validateCustomMarkerType(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Marker type data is required.');
   if (typeof input.name !== 'string' || !input.name.trim() || input.name.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(input.name)) throw new Error('Type name must contain 1–40 plain-text characters.');
   if (typeof input.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(input.color)) throw new Error('Choose a six-digit hex color.');
-  if (typeof input.icon !== 'string' || !CUSTOM_MARKER_ICONS.has(input.icon)) throw new Error('Choose a bundled marker icon.');
+  if (typeof input.icon !== 'string' || (!/^minecraft:[a-z0-9_./-]+$/.test(input.icon) && !LEGACY_MARKER_ICONS.has(input.icon))) throw new Error('Choose a Minecraft inventory item icon.');
+  if (input.icon.startsWith('minecraft:')) validateItemIcon(input.icon);
   return { name: input.name.trim(), color: input.color.toLowerCase(), icon: input.icon };
 }
 
@@ -344,11 +348,19 @@ export function restoreCustomMarkerTypeCommand(db, command, target, expectedRevi
   tx();
   return { revision: expectedRevision + 1 };
 }
+const LEGACY_MARKER_ICONS = new Set(['chest','relic','shop','other']);
+function validateItemIcon(icon) {
+  if (icon === undefined || icon === null || icon === '' || LEGACY_MARKER_ICONS.has(icon)) return icon || null;
+  if (typeof icon !== 'string' || !/^minecraft:[a-z0-9_./-]+$/.test(icon) || icon.split(':')[1].split('/').some(part => part === '..' || part === '.')) throw new Error('Choose a Minecraft inventory item icon.');
+  return icon;
+}
+
 function validateMarker(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Marker data is required.');
   if (typeof input.type !== 'string' || (!BUILT_IN_MARKER_TYPES.has(input.type) && !/^custom_[0-9a-f-]{36}$/.test(input.type))) throw new Error('Choose a supported marker type.');
   if (typeof input.name !== 'string' || !input.name.trim() || input.name.trim().length > 80) throw new Error('Marker name must contain 1–80 characters.');
   if (input.description !== undefined && (typeof input.description !== 'string' || input.description.length > 500)) throw new Error('Marker description must be 500 characters or fewer.');
+  validateItemIcon(input.icon);
   if (![input.x, input.z].every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) throw new Error('Marker coordinates must be finite block coordinates.');
 }
 
@@ -376,16 +388,16 @@ export function saveMarker(db, input, expectedRevision, id = null, { preserveDis
       if (current.stair_destination_id && input.type !== 'stairs') {
         db.prepare('UPDATE markers SET stair_destination_id=NULL WHERE id IN (?,?)').run(id, current.stair_destination_id);
       }
-      const result = db.prepare('UPDATE markers SET section_id=?,type=?,name=?,description=?,x=?,z=? WHERE id=?').run(input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z, id);
+      const result = db.prepare('UPDATE markers SET section_id=?,type=?,name=?,description=?,x=?,z=?,icon=? WHERE id=?').run(input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z, validateItemIcon(input.icon), id);
       if (result.changes !== 1) throw new Error('Marker does not exist.');
     } else {
       id = randomUUID();
-      db.prepare('INSERT INTO markers(id,section_id,type,name,description,x,z) VALUES(?,?,?,?,?,?,?)').run(id, input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z);
+      db.prepare('INSERT INTO markers(id,section_id,type,name,description,x,z,icon) VALUES(?,?,?,?,?,?,?,?)').run(id, input.sectionId, input.type, input.name.trim(), input.description ?? '', x, z, validateItemIcon(input.icon));
     }
     advanceProjectRevision(db, expectedRevision);
   });
   tx();
-  return { id, sectionId: input.sectionId, type: input.type, name: input.name.trim(), description: input.description ?? '', x, z, revision: expectedRevision + 1 };
+  return { id, sectionId: input.sectionId, type: input.type, name: input.name.trim(), description: input.description ?? '', x, z, icon: validateItemIcon(input.icon), revision: expectedRevision + 1 };
 }
 
 export function deleteMarker(db, id, expectedRevision, { confirmUnlink = false } = {}) {
@@ -435,7 +447,7 @@ export function unlinkStair(db, id, expectedRevision) {
 }
 
 export function readMarker(db, id) {
-  const row = db.prepare('SELECT id,section_id AS sectionId,type,name,description,x,z,stair_destination_id AS stairDestinationId FROM markers WHERE id=?').get(id);
+  const row = db.prepare('SELECT id,section_id AS sectionId,type,name,description,x,z,icon,stair_destination_id AS stairDestinationId FROM markers WHERE id=?').get(id);
   return row ?? null;
 }
 
@@ -459,9 +471,9 @@ export function restoreMarker(db, id, marker, expectedRevision) {
         const partner = db.prepare('SELECT m.type,m.stair_destination_id,s.floor_id FROM markers m JOIN sections s ON s.id=m.section_id WHERE m.id=?').get(marker.stairDestinationId);
         if (!partner || partner.type !== 'stairs' || partner.floor_id === owner.floor_id || (partner.stair_destination_id && partner.stair_destination_id !== id)) throw new Error('The stair destination is no longer available.');
       }
-      db.prepare(`INSERT INTO markers(id,section_id,type,name,description,x,z,stair_destination_id) VALUES(?,?,?,?,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET section_id=excluded.section_id,type=excluded.type,name=excluded.name,description=excluded.description,x=excluded.x,z=excluded.z,stair_destination_id=excluded.stair_destination_id`)
-        .run(id, marker.sectionId, marker.type, marker.name, marker.description ?? '', marker.x, marker.z, marker.stairDestinationId ?? null);
+      db.prepare(`INSERT INTO markers(id,section_id,type,name,description,x,z,stair_destination_id,icon) VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET section_id=excluded.section_id,type=excluded.type,name=excluded.name,description=excluded.description,x=excluded.x,z=excluded.z,stair_destination_id=excluded.stair_destination_id,icon=excluded.icon`)
+        .run(id, marker.sectionId, marker.type, marker.name, marker.description ?? '', marker.x, marker.z, marker.stairDestinationId ?? null, validateItemIcon(marker.icon));
       if (marker.stairDestinationId) db.prepare('UPDATE markers SET stair_destination_id=? WHERE id=?').run(id, marker.stairDestinationId);
     }
     advanceProjectRevision(db, expectedRevision);
@@ -475,6 +487,7 @@ function validateConnection(input) {
   if (typeof input.sectionAId !== 'string' || typeof input.sectionBId !== 'string' || input.sectionAId === input.sectionBId) throw new Error('Choose two different sections.');
   if (![input.xA, input.zA, input.xB, input.zB].every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) throw new Error('Connection anchors must be finite local coordinates.');
   if (input.label !== undefined && (typeof input.label !== 'string' || input.label.length > 120 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.label))) throw new Error('Connection label must be 120 plain-text characters or fewer.');
+  validateItemIcon(input.icon);
 }
 
 function validateConnectionSections(db, input) {
@@ -489,7 +502,7 @@ function validateConnectionSections(db, input) {
 }
 
 export function readSectionConnection(db, id) {
-  return db.prepare('SELECT id,section_a_id AS sectionAId,x_a AS xA,z_a AS zA,section_b_id AS sectionBId,x_b AS xB,z_b AS zB,label FROM section_connections WHERE id=?').get(id) ?? null;
+  return db.prepare('SELECT id,section_a_id AS sectionAId,x_a AS xA,z_a AS zA,section_b_id AS sectionBId,x_b AS xB,z_b AS zB,label,icon FROM section_connections WHERE id=?').get(id) ?? null;
 }
 
 /** Save a visual-only connection using section-local anchors and a project revision. */
@@ -500,11 +513,11 @@ export function saveSectionConnection(db, input, expectedRevision, id = null) {
   const label = (input.label ?? '').trim();
   const tx = db.transaction(() => {
     if (id) {
-      const result = db.prepare('UPDATE section_connections SET section_a_id=?,x_a=?,z_a=?,section_b_id=?,x_b=?,z_b=?,label=? WHERE id=?').run(input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label, id);
+      const result = db.prepare('UPDATE section_connections SET section_a_id=?,x_a=?,z_a=?,section_b_id=?,x_b=?,z_b=?,label=?,icon=? WHERE id=?').run(input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label, validateItemIcon(input.icon) ?? 'minecraft:oak_stairs', id);
       if (!result.changes) throw new Error('Section connection does not exist.');
     } else {
       id = randomUUID();
-      db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label) VALUES(?,?,?,?,?,?,?,?)').run(id, input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label);
+      db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label,icon) VALUES(?,?,?,?,?,?,?,?,?)').run(id, input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label, validateItemIcon(input.icon) ?? 'minecraft:oak_stairs');
     }
     advanceProjectRevision(db, expectedRevision);
   });
@@ -529,9 +542,9 @@ export function restoreSectionConnection(db, id, connection, expectedRevision) {
     else {
       validateConnection(connection);
       validateConnectionSections(db, connection);
-      db.prepare(`INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label) VALUES(?,?,?,?,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET section_a_id=excluded.section_a_id,x_a=excluded.x_a,z_a=excluded.z_a,section_b_id=excluded.section_b_id,x_b=excluded.x_b,z_b=excluded.z_b,label=excluded.label`)
-        .run(id, connection.sectionAId, connection.xA, connection.zA, connection.sectionBId, connection.xB, connection.zB, connection.label ?? '');
+      db.prepare(`INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label,icon) VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET section_a_id=excluded.section_a_id,x_a=excluded.x_a,z_a=excluded.z_a,section_b_id=excluded.section_b_id,x_b=excluded.x_b,z_b=excluded.z_b,label=excluded.label,icon=excluded.icon`)
+        .run(id, connection.sectionAId, connection.xA, connection.zA, connection.sectionBId, connection.xB, connection.zB, connection.label ?? '', validateItemIcon(connection.icon) ?? 'minecraft:oak_stairs');
     }
     advanceProjectRevision(db, expectedRevision);
   });
@@ -573,14 +586,14 @@ export function snapshotProject(db) {
     const maxY = Math.max(1, ...sections.map(section => section.bounds.y));
     const blocks = sections.flatMap(section => sectionBlocks.get(section.id).map(block => ({ ...block, sectionId: section.id, localX: block.x, localY: block.y, localZ: block.z, x: block.x + section.placementX - minX, z: block.z + section.placementZ - minZ })));
     for (const section of sections) { section.placementX -= minX; section.placementZ -= minZ; }
-    const markers = db.prepare(`SELECT m.id,m.section_id AS sectionId,m.type,m.name,m.description,m.x,m.z,m.stair_destination_id AS stairDestinationId,s.placement_x AS sectionX,s.placement_z AS sectionZ FROM markers m JOIN sections s ON s.id=m.section_id WHERE s.floor_id=? ORDER BY m.id`).all(floor.id).map(marker => ({
-      id: marker.id, sectionId: marker.sectionId, type: marker.type, name: marker.name, description: marker.description,
+    const markers = db.prepare(`SELECT m.id,m.section_id AS sectionId,m.type,m.name,m.description,m.x,m.z,m.icon,m.stair_destination_id AS stairDestinationId,s.placement_x AS sectionX,s.placement_z AS sectionZ FROM markers m JOIN sections s ON s.id=m.section_id WHERE s.floor_id=? ORDER BY m.id`).all(floor.id).map(marker => ({
+      id: marker.id, sectionId: marker.sectionId, type: marker.type, name: marker.name, description: marker.description, icon: marker.icon,
       x: sectionLocalToFloor({ placementX: marker.sectionX, placementZ: marker.sectionZ }, { x: marker.x, z: marker.z }, { x: minX, z: minZ }).x,
       z: sectionLocalToFloor({ placementX: marker.sectionX, placementZ: marker.sectionZ }, { x: marker.x, z: marker.z }, { x: minX, z: minZ }).z,
       localX: marker.x, localZ: marker.z, stairDestinationId: marker.stairDestinationId
     }));
-    const connections = db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.x_a AS xA,c.z_a AS zA,c.section_b_id AS sectionBId,c.x_b AS xB,c.z_b AS zB,c.label,s1.placement_x AS ax,s1.placement_z AS az,s2.placement_x AS bx,s2.placement_z AS bz FROM section_connections c JOIN sections s1 ON s1.id=c.section_a_id JOIN sections s2 ON s2.id=c.section_b_id WHERE s1.floor_id=? ORDER BY c.id`).all(floor.id).map(connection => ({
-      id: connection.id, sectionAId: connection.sectionAId, xA: connection.xA, zA: connection.zA, sectionBId: connection.sectionBId, xB: connection.xB, zB: connection.zB, label: connection.label,
+    const connections = db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.x_a AS xA,c.z_a AS zA,c.section_b_id AS sectionBId,c.x_b AS xB,c.z_b AS zB,c.label,c.icon,s1.placement_x AS ax,s1.placement_z AS az,s2.placement_x AS bx,s2.placement_z AS bz FROM section_connections c JOIN sections s1 ON s1.id=c.section_a_id JOIN sections s2 ON s2.id=c.section_b_id WHERE s1.floor_id=? ORDER BY c.id`).all(floor.id).map(connection => ({
+      id: connection.id, sectionAId: connection.sectionAId, xA: connection.xA, zA: connection.zA, sectionBId: connection.sectionBId, xB: connection.xB, zB: connection.zB, label: connection.label, icon: connection.icon,
       displayA: { x: connection.ax + connection.xA - minX, z: connection.az + connection.zA - minZ },
       displayB: { x: connection.bx + connection.xB - minX, z: connection.bz + connection.zB - minZ }
     }));

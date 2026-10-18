@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { openProject, projectRevision, seedInitialProject, snapshotProject } from './project-store.js';
@@ -14,8 +14,10 @@ try {
   const seeded = seedInitialProject(db, workerData.fixturePath);
   const assetsDir = workerData.assetsDir;
   if (workerData.clientJar && existsSync(workerData.clientJar)) {
-    try { await stat(path.join(assetsDir, 'asset-source.json')); }
-    catch { await extractMatchingAssets(workerData.clientJar, assetsDir); }
+    let hasItemTextures = false;
+    try { const source = JSON.parse(await readFile(path.join(assetsDir, 'asset-source.json'), 'utf8')); hasItemTextures = Number.isInteger(source.itemTextures) && source.itemTextures > 0; }
+    catch { /* extract assets below */ }
+    if (!hasItemTextures) await extractMatchingAssets(workerData.clientJar, assetsDir);
   }
   let warning = null;
   let rendered = false;
