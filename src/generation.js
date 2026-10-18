@@ -178,7 +178,8 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
     if (floorId) {
       const floor = manifest.floors.find(item => item.id === floorId);
       if (!floor) throw new Error('Floor does not exist in the saved map.');
-      return { ...floor, projectRevision: manifest.projectRevision, generatedAt: manifest.generatedAt };
+      const imageVersion = [manifest.generatorVersion, manifest.assetHash, manifest.renderSettingsHash, floor.renderer?.version ?? 0].join('-');
+      return { ...floor, projectRevision: manifest.projectRevision, generatedAt: manifest.generatedAt, imageVersion };
     }
     return manifest;
   }

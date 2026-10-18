@@ -168,7 +168,7 @@ async function loadFloor(floorId) {
       sliceMaximum = Number(slider.max); visibleHeight = sliceMaximum; slider.value = String(sliceMaximum);
     }
   }
-  image.src = `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorId)}`;
+  image.src = `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorId)}&v=${encodeURIComponent(floorManifest.imageVersion)}`;
   image.hidden = false; message.hidden = true;
   const sections = (floorManifest.sections ?? []).map(section => section.name).join(' · ');
   document.querySelector('#caption').textContent = `${sections || floorManifest.name} · ${floorManifest.name} · ${floorManifest.bounds.width} × ${floorManifest.bounds.depth}`;
@@ -235,7 +235,9 @@ function populateSectionLayout() {
   document.querySelector('#render-cutaway').value = settings.cutaways.map(box => [box.x,box.y,box.z,box.width,box.height,box.depth].join(',')).join('\n');
   document.querySelector('#render-excluded').value = [...new Set([...defaultHiddenBlocks, ...settings.excludedBlocks])].join(', ');
   document.querySelector('#render-pixel-size').value = settings.pixelSize;
-  document.querySelector('#render-height-shade').value = settings.heightShadePerBlock;
+  const shadeStrength = Math.round(settings.heightShadePerBlock * 2000);
+  document.querySelector('#render-height-shade').value = shadeStrength;
+  document.querySelector('#render-height-shade-value').value = `${shadeStrength}%`;
 }
 function readRenderSettings() {
   const lines = document.querySelector('#render-cutaway').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -244,7 +246,7 @@ function readRenderSettings() {
     if (values.length !== 6 || values.some(value => !Number.isSafeInteger(value))) throw new Error('Each cutaway line needs six whole numbers: x,y,z,width,height,depth.');
     const [x,y,z,width,height,depth] = values; return { x,y,z,width,height,depth };
   });
-  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) };
+  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000 };
 }
 async function saveRenderSettings() {
   const section = selectedLayoutSection(), status = document.querySelector('#render-settings-status'); if (!section) return;
@@ -259,6 +261,8 @@ async function saveRenderSettings() {
   } catch (error) { status.textContent = error.message; }
 }
 document.querySelector('#render-settings-save').addEventListener('click', () => void saveRenderSettings());
+document.querySelector('#render-shade-save').addEventListener('click', () => void saveRenderSettings());
+document.querySelector('#render-height-shade').addEventListener('input', event => { document.querySelector('#render-height-shade-value').value = `${event.target.value}%`; });
 async function renderSettingsHistory(direction) {
   const status = document.querySelector('#render-settings-status');
   const response = await fetch(`/api/project/render-settings/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
@@ -352,7 +356,7 @@ function updateSlicePreview() {
     slicePreviewActive = visibleHeight < sliceMaximum;
     image.src = slicePreviewActive
       ? `/api/project/preview?floor=${encodeURIComponent(floorManifest.id)}&maxY=${visibleHeight}&nonce=${Date.now()}`
-      : `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorManifest.id)}`;
+      : `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorManifest.id)}&v=${encodeURIComponent(floorManifest.imageVersion)}`;
   }, 250);
 }
 document.querySelector('#floor').addEventListener('change', event => loadFloor(event.target.value).catch(error => { message.textContent = error.message; message.hidden = false; }));
