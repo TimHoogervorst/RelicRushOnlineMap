@@ -37,13 +37,14 @@ function matchingModels(blockstate, properties) {
   return output;
 }
 
-export async function renderOrthographic(schematic, { assets, output, pixelSize = 16, heightShadePerBlock = 0.018, heightShadeMinY = null, heightShadeMaxY = null, maxPixels = MAX_RENDER_PIXELS, assetOverrides = [] } = {}) {
+export async function renderOrthographic(schematic, { assets, output, pixelSize = 16, heightShadePerBlock = 0.018, heightShadeMinY = null, heightShadeMaxY = null, heightShadeMultiplier = 1, maxPixels = MAX_RENDER_PIXELS, assetOverrides = [] } = {}) {
   if (!assets) throw new Error('Minecraft assets are not configured. Set MINECRAFT_ASSETS to the extracted assets/minecraft directory from the matching Minecraft 26.3 client JAR.');
   if (!Number.isInteger(pixelSize) || pixelSize < 4 || pixelSize > 32) throw new Error('Pixel scale must be an integer from 4 to 32 pixels per block.');
   if (typeof heightShadePerBlock !== 'number' || !Number.isFinite(heightShadePerBlock) || heightShadePerBlock < 0 || heightShadePerBlock > 0.05) throw new Error('Height shading must be between 0 and 0.05 per block.');
   if (heightShadeMinY !== null && (!Number.isSafeInteger(heightShadeMinY) || Math.abs(heightShadeMinY) > 1_000_000)) throw new Error('Minimum shading Y must be a whole block coordinate.');
   if (heightShadeMaxY !== null && (!Number.isSafeInteger(heightShadeMaxY) || Math.abs(heightShadeMaxY) > 1_000_000)) throw new Error('Maximum shading Y must be a whole block coordinate.');
   if (heightShadeMinY !== null && heightShadeMaxY !== null && heightShadeMinY >= heightShadeMaxY) throw new Error('Maximum shading Y must be higher than minimum shading Y.');
+  if (typeof heightShadeMultiplier !== 'number' || !Number.isFinite(heightShadeMultiplier) || heightShadeMultiplier < 0 || heightShadeMultiplier > 10) throw new Error('Height shading multiplier must be from 0 to 10.');
   const { x: width, z: depth, y: height } = schematic.dimensions;
   const outWidth = width * pixelSize, outHeight = depth * pixelSize;
   const pixelLimit = Math.min(maxPixels, MAX_RENDER_PIXELS);
@@ -242,7 +243,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
   const shadeLowY = heightShadeMinY === null ? lowY : heightShadeMinY + 1;
   const shadeHighY = heightShadeMaxY === null ? highY : heightShadeMaxY + 1;
   const verticalSpan = Number.isFinite(shadeLowY) && Number.isFinite(shadeHighY) ? Math.max(0, shadeHighY - shadeLowY) : 0;
-  const totalLayerContrast = Math.min(0.18, verticalSpan * heightShadePerBlock);
+  const totalLayerContrast = Math.min(0.9, Math.min(0.18, verticalSpan * heightShadePerBlock) * heightShadeMultiplier);
   const sigmoidMin = 1 / (1 + Math.exp(1));
   const sigmoidMax = 1 / (1 + Math.exp(-1));
   const layerShade = surfaceY => {
@@ -270,7 +271,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),
-    renderer: { name: 'relic-ortho-model-rasterizer', version: 5, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
+    renderer: { name: 'relic-ortho-model-rasterizer', version: 6, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, heightShadeMultiplier, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
   };
 }
 

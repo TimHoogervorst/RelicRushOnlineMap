@@ -542,7 +542,7 @@ export function restoreSectionConnection(db, id, connection, expectedRevision) {
 export function snapshotProject(db) {
   const revision = projectRevision(db);
   const renderOptionsRow = db.prepare("SELECT value FROM project_meta WHERE key='render_options'").get();
-  const renderOptions = renderOptionsRow ? JSON.parse(renderOptionsRow.value) : { pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null };
+  const renderOptions = renderOptionsRow ? JSON.parse(renderOptionsRow.value) : { pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1 };
   const markerTypes = listMarkerTypes(db);
   const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
   const unresolvedRecords = {
@@ -589,7 +589,7 @@ export function snapshotProject(db) {
 }
 
 export function defaultSectionRenderSettings() {
-  return { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null };
+  return { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1 };
 }
 
 function validateSectionRenderSettings(input) {
@@ -597,18 +597,20 @@ function validateSectionRenderSettings(input) {
   const cutaways = input.cutaways ?? [], excludedBlocks = input.excludedBlocks ?? [];
   const pixelSize = input.pixelSize ?? 16, heightShadePerBlock = input.heightShadePerBlock ?? 0.018;
   const heightShadeMinY = input.heightShadeMinY ?? null, heightShadeMaxY = input.heightShadeMaxY ?? null;
+  const heightShadeMultiplier = input.heightShadeMultiplier ?? 1;
   if (!Number.isInteger(pixelSize) || pixelSize < 4 || pixelSize > 32) throw new Error('Pixel scale must be from 4 to 32 pixels per block.');
   if (typeof heightShadePerBlock !== 'number' || !Number.isFinite(heightShadePerBlock) || heightShadePerBlock < 0 || heightShadePerBlock > 0.05) throw new Error('Height shading must be from 0 to 0.05 per block.');
   if (heightShadeMinY !== null && (!Number.isSafeInteger(heightShadeMinY) || Math.abs(heightShadeMinY) > 1_000_000)) throw new Error('Minimum shading Y must be a whole block coordinate.');
   if (heightShadeMaxY !== null && (!Number.isSafeInteger(heightShadeMaxY) || Math.abs(heightShadeMaxY) > 1_000_000)) throw new Error('Maximum shading Y must be a whole block coordinate.');
   if (heightShadeMinY !== null && heightShadeMaxY !== null && heightShadeMinY >= heightShadeMaxY) throw new Error('Maximum shading Y must be higher than minimum shading Y.');
+  if (typeof heightShadeMultiplier !== 'number' || !Number.isFinite(heightShadeMultiplier) || heightShadeMultiplier < 0 || heightShadeMultiplier > 10) throw new Error('Height shading multiplier must be from 0 to 10.');
   if (!Array.isArray(cutaways) || cutaways.length > 100) throw new Error('A section can have at most 100 cutaway boxes.');
   for (const box of cutaways) {
     if (!box || !['x','y','z','width','height','depth'].every(key => Number.isSafeInteger(box[key]))) throw new Error('Cutaway boxes must use integer section coordinates and dimensions.');
     if (box.x < -1000000 || box.y < -1000000 || box.z < -1000000 || box.width < 1 || box.height < 1 || box.depth < 1 || box.width > 1000000 || box.height > 1000000 || box.depth > 1000000) throw new Error('Cutaway boxes must have positive bounded dimensions.');
   }
   if (!Array.isArray(excludedBlocks) || excludedBlocks.length > 1000 || excludedBlocks.some(name => typeof name !== 'string' || !/^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(name))) throw new Error('Excluded blocks must be namespaced Minecraft block IDs.');
-  return { cutaways: cutaways.map(({ x,y,z,width,height,depth }) => ({ x,y,z,width,height,depth })), excludedBlocks: [...new Set(excludedBlocks)].sort(), pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY };
+  return { cutaways: cutaways.map(({ x,y,z,width,height,depth }) => ({ x,y,z,width,height,depth })), excludedBlocks: [...new Set(excludedBlocks)].sort(), pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, heightShadeMultiplier };
 }
 
 export function saveSectionRenderSettings(db, sectionId, input, expectedRevision) {
@@ -620,7 +622,7 @@ export function saveSectionRenderSettings(db, sectionId, input, expectedRevision
   const before = { ...defaultSectionRenderSettings(), ...(current ? JSON.parse(current.settings_json) : {}), ...(renderOptionsRow ? JSON.parse(renderOptionsRow.value) : {}) };
   const tx = db.transaction(() => {
     db.prepare(`INSERT INTO section_render_settings(section_id,settings_json) VALUES(?,?) ON CONFLICT(section_id) DO UPDATE SET settings_json=excluded.settings_json`).run(sectionId, JSON.stringify({ cutaways: settings.cutaways, excludedBlocks: settings.excludedBlocks }));
-    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: settings.pixelSize, heightShadePerBlock: settings.heightShadePerBlock, heightShadeMinY: settings.heightShadeMinY, heightShadeMaxY: settings.heightShadeMaxY }));
+    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: settings.pixelSize, heightShadePerBlock: settings.heightShadePerBlock, heightShadeMinY: settings.heightShadeMinY, heightShadeMaxY: settings.heightShadeMaxY, heightShadeMultiplier: settings.heightShadeMultiplier }));
     advanceProjectRevision(db, expectedRevision);
   });
   tx();
@@ -636,7 +638,7 @@ export function restoreSectionRenderSettings(db, command, direction, expectedRev
   const tx = db.transaction(() => {
     const validated = validateSectionRenderSettings(target);
     db.prepare(`INSERT INTO section_render_settings(section_id,settings_json) VALUES(?,?) ON CONFLICT(section_id) DO UPDATE SET settings_json=excluded.settings_json`).run(command.sectionId, JSON.stringify({ cutaways: validated.cutaways, excludedBlocks: validated.excludedBlocks }));
-    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: validated.pixelSize, heightShadePerBlock: validated.heightShadePerBlock, heightShadeMinY: validated.heightShadeMinY, heightShadeMaxY: validated.heightShadeMaxY }));
+    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: validated.pixelSize, heightShadePerBlock: validated.heightShadePerBlock, heightShadeMinY: validated.heightShadeMinY, heightShadeMaxY: validated.heightShadeMaxY, heightShadeMultiplier: validated.heightShadeMultiplier }));
     advanceProjectRevision(db, expectedRevision);
   });
   tx();

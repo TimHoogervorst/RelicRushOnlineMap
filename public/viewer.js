@@ -240,6 +240,7 @@ function populateSectionLayout() {
   document.querySelector('#render-height-shade-value').value = `${shadeStrength}%`;
   document.querySelector('#render-height-shade-min-y').value = settings.heightShadeMinY ?? '';
   document.querySelector('#render-height-shade-max-y').value = settings.heightShadeMaxY ?? '';
+  document.querySelector('#render-height-shade-multiplier').value = settings.heightShadeMultiplier ?? 1;
 }
 function readRenderSettings() {
   const lines = document.querySelector('#render-cutaway').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -250,7 +251,7 @@ function readRenderSettings() {
   });
   const minYValue = document.querySelector('#render-height-shade-min-y').value;
   const maxYValue = document.querySelector('#render-height-shade-max-y').value;
-  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000, heightShadeMinY: minYValue === '' ? null : Number(minYValue), heightShadeMaxY: maxYValue === '' ? null : Number(maxYValue) };
+  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000, heightShadeMinY: minYValue === '' ? null : Number(minYValue), heightShadeMaxY: maxYValue === '' ? null : Number(maxYValue), heightShadeMultiplier: Number(document.querySelector('#render-height-shade-multiplier').value) };
 }
 async function saveRenderSettings(status = document.querySelector('#render-settings-status')) {
   const section = selectedLayoutSection(); if (!section) return;
@@ -264,9 +265,10 @@ async function saveRenderSettings(status = document.querySelector('#render-setti
     const shadeDraft = status.id === 'render-shade-status' ? {
       strength: document.querySelector('#render-height-shade').value,
       minY: document.querySelector('#render-height-shade-min-y').value,
-      maxY: document.querySelector('#render-height-shade-max-y').value
+      maxY: document.querySelector('#render-height-shade-max-y').value,
+      multiplier: document.querySelector('#render-height-shade-multiplier').value
     } : null;
-    const shadeChangedWhileSaving = shadeDraft && (shadeDraft.strength !== String(Math.round(settings.heightShadePerBlock * 2000)) || shadeDraft.minY !== String(settings.heightShadeMinY ?? '') || shadeDraft.maxY !== String(settings.heightShadeMaxY ?? ''));
+    const shadeChangedWhileSaving = shadeDraft && (shadeDraft.strength !== String(Math.round(settings.heightShadePerBlock * 2000)) || shadeDraft.minY !== String(settings.heightShadeMinY ?? '') || shadeDraft.maxY !== String(settings.heightShadeMaxY ?? '') || shadeDraft.multiplier !== String(settings.heightShadeMultiplier ?? 1));
     status.textContent = status.id === 'render-shade-status' ? 'Shading saved. The map was regenerated.' : 'Render settings saved. The visitor map was regenerated.';
     await loadFloor(floorManifest.id);
     if (shadeChangedWhileSaving) {
@@ -274,6 +276,7 @@ async function saveRenderSettings(status = document.querySelector('#render-setti
       document.querySelector('#render-height-shade-value').value = `${shadeDraft.strength}%`;
       document.querySelector('#render-height-shade-min-y').value = shadeDraft.minY;
       document.querySelector('#render-height-shade-max-y').value = shadeDraft.maxY;
+      document.querySelector('#render-height-shade-multiplier').value = shadeDraft.multiplier;
     }
     await refreshSaveStatus();
   } catch (error) { status.textContent = error.message; }
@@ -285,7 +288,7 @@ function queueRenderSettingsSave(status = document.querySelector('#render-settin
 }
 document.querySelector('#render-settings-save').addEventListener('click', () => void queueRenderSettingsSave());
 document.querySelector('#render-height-shade').addEventListener('input', event => { document.querySelector('#render-height-shade-value').value = `${event.target.value}%`; });
-for (const id of ['render-height-shade', 'render-height-shade-min-y', 'render-height-shade-max-y']) {
+for (const id of ['render-height-shade', 'render-height-shade-min-y', 'render-height-shade-max-y', 'render-height-shade-multiplier']) {
   document.querySelector(`#${id}`).addEventListener('change', () => void queueRenderSettingsSave(document.querySelector('#render-shade-status')));
 }
 async function renderSettingsHistory(direction) {
