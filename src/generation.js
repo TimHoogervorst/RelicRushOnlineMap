@@ -5,6 +5,7 @@ import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
 
 const GENERATOR_VERSION = '1';
+const DEFAULT_HIDDEN_BLOCKS = new Set(['minecraft:brown_mushroom_block', 'minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:glow_lichen', 'minecraft:decorated_pot', 'minecraft:seagrass']);
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -84,7 +85,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           const sections = new Map((floor.sections ?? []).map(section => [section.id, section]));
           const blocks = floor.blocks.filter(block => {
             const settings = sections.get(block.sectionId)?.renderSettings ?? {};
-            if ((settings.excludedBlocks ?? []).includes(block.id)) return false;
+            if (DEFAULT_HIDDEN_BLOCKS.has(block.id) || (settings.excludedBlocks ?? []).includes(block.id)) return false;
             const x = block.localX ?? block.x, y = block.localY ?? block.y, z = block.localZ ?? block.z;
             return !(settings.cutaways ?? []).some(box => x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height && z >= box.z && z < box.z + box.depth);
           }).map(({ sectionId, localX, localY, localZ, ...block }) => block);

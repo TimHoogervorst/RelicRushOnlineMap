@@ -7,6 +7,7 @@ const legendPanel = document.querySelector('#legend-panel');
 const editorPanel = document.querySelector('#editor-panel');
 const loginPanel = document.querySelector('#login-panel');
 const setupPanel = document.querySelector('#setup-panel');
+const defaultHiddenBlocks = ['minecraft:brown_mushroom_block', 'minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:glow_lichen', 'minecraft:decorated_pot', 'minecraft:seagrass'];
 let zoom = 1, offsetX = 0, offsetY = 0, pointer = null, slicePreviewActive = false;
 const mapPointers = new Map();
 let pinch = null, suppressMapClick = false;
@@ -54,7 +55,7 @@ viewport.addEventListener('wheel', event => {
   setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
 }, { passive: false });
 viewport.addEventListener('pointerdown', event => {
-  if (event.target.closest('.map-marker, .section-label, #marker-popup')) return;
+  if (event.target.closest('.map-marker, .section-label, #marker-popup, #cell-popup, #block-inspector')) return;
   mapPointers.set(event.pointerId, { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey });
   viewport.setPointerCapture(event.pointerId);
   if (mapPointers.size === 1) {
@@ -232,7 +233,7 @@ function populateSectionLayout() {
   document.querySelector('#section-label-z').value = section.labelZ;
   const settings = section.renderSettings ?? { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018 };
   document.querySelector('#render-cutaway').value = settings.cutaways.map(box => [box.x,box.y,box.z,box.width,box.height,box.depth].join(',')).join('\n');
-  document.querySelector('#render-excluded').value = settings.excludedBlocks.join(', ');
+  document.querySelector('#render-excluded').value = [...new Set([...defaultHiddenBlocks, ...settings.excludedBlocks])].join(', ');
   document.querySelector('#render-pixel-size').value = settings.pixelSize;
   document.querySelector('#render-height-shade').value = settings.heightShadePerBlock;
 }
@@ -365,7 +366,27 @@ function renderSidebar() {
   modeButton.textContent = editorOpen ? 'Done editing' : 'Edit';
   modeButton.setAttribute('aria-pressed', String(editorOpen));
   document.querySelector('#marker-layer').classList.toggle('editing', editorOpen);
+  document.querySelector('#block-inspector').hidden = !editorOpen || !inspectedCoords;
 }
+
+function collapseEditorSections(container) {
+  let current = null;
+  for (const child of [...container.children]) {
+    if (child.tagName === 'H3') {
+      current = document.createElement('details');
+      current.className = 'editor-section';
+      const summary = document.createElement('summary');
+      summary.textContent = child.textContent;
+      current.append(summary);
+      container.insertBefore(current, child);
+      child.remove();
+    } else if (current) current.append(child);
+  }
+}
+collapseEditorSections(setupPanel);
+collapseEditorSections(editorPanel);
+const blockInspector = document.querySelector('#block-inspector');
+viewport.append(blockInspector);
 
 function renderBlockPalette() {
   const host = document.querySelector('#block-palette');
@@ -439,6 +460,11 @@ async function inspectBlockAt(clientX, clientY, additive = false) {
     document.querySelector('#block-status').textContent = top ? 'Block selected.' : 'Empty cell selected at Y 0.';
     if (top) chooseBlock(top.id); else if (paletteChoice) renderBlockProperties();
     else document.querySelector('#block-selected-state').textContent = 'minecraft:air';
+    const popup = document.querySelector('#cell-popup'), frameRect = frame.getBoundingClientRect();
+    popup.style.left = `${(clientX - frameRect.left) / zoom + 12}px`;
+    popup.style.top = `${(clientY - frameRect.top) / zoom + 12}px`;
+    document.querySelector('#cell-coordinate').textContent = `${target.section.name} · ${x}, ${top?.y ?? 0}, ${z}`;
+    popup.hidden = false;
   } catch (error) { document.querySelector('#block-status').textContent = error.message; }
 }
 async function saveSelectedBlock(state = paletteChoice) {
@@ -865,6 +891,32 @@ async function persistMarker(id = document.querySelector('#marker-id').value, pr
 }
 document.querySelector('#marker-form').addEventListener('submit', event => { event.preventDefault(); void persistMarker(); });
 document.querySelector('#marker-new').addEventListener('click', () => populateMarkerForm());
+function openEditorSection(title) {
+  const details = [...editorPanel.querySelectorAll('details.editor-section')].find(item => item.querySelector('summary')?.textContent.trim() === title);
+  if (details) details.open = true;
+  sidebarOpen = true;
+  renderSidebar();
+}
+document.querySelector('#cell-add-marker').addEventListener('click', () => {
+  if (!inspectedSection || !inspectedCoords) return;
+  openEditorSection('Markers');
+  populateMarkerForm();
+  document.querySelector('#marker-section').value = inspectedSection.id;
+  document.querySelector('#marker-x').value = inspectedCoords.x + 0.5;
+  document.querySelector('#marker-z').value = inspectedCoords.z + 0.5;
+  document.querySelector('#cell-popup').hidden = true;
+});
+document.querySelector('#cell-add-connection').addEventListener('click', () => {
+  if (!inspectedSection || !inspectedCoords) return;
+  openEditorSection('Section connections');
+  document.querySelector('#connection-new').click();
+  document.querySelector('#connection-a').value = inspectedSection.id;
+  document.querySelector('#connection-x-a').value = inspectedCoords.x + 0.5;
+  document.querySelector('#connection-z-a').value = inspectedCoords.z + 0.5;
+  const other = floorManifest.sections.find(section => section.id !== inspectedSection.id);
+  if (other) document.querySelector('#connection-b').value = other.id;
+  document.querySelector('#cell-popup').hidden = true;
+});
 document.querySelector('#marker-delete').addEventListener('click', async () => {
   const id = document.querySelector('#marker-id').value;
   const marker = floorManifest.markers.find(item => item.id === id), linked = Boolean(marker?.stairDestinationId);
