@@ -234,13 +234,13 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     heightGrid[z][x] = Math.max(heightGrid[z][x] ?? -Infinity, surface);
   }
   const verticalSpan = Number.isFinite(lowY) && Number.isFinite(highY) ? Math.max(0, highY - lowY) : 0;
-  const totalLayerContrast = Math.min(0.1, verticalSpan * heightShadePerBlock);
-  const sigmoidMin = 1 / (1 + Math.exp(3));
-  const sigmoidMax = 1 / (1 + Math.exp(-3));
+  const totalLayerContrast = Math.min(0.18, verticalSpan * heightShadePerBlock);
+  const sigmoidMin = 1 / (1 + Math.exp(1));
+  const sigmoidMax = 1 / (1 + Math.exp(-1));
   const layerShade = surfaceY => {
     if (!verticalSpan || !totalLayerContrast) return 1;
     const position = Math.max(0, Math.min(1, (surfaceY - lowY) / verticalSpan));
-    const sigmoid = 1 / (1 + Math.exp(-6 * (position - 0.5)));
+    const sigmoid = 1 / (1 + Math.exp(-2 * (position - 0.5)));
     const normalized = (sigmoid - sigmoidMin) / (sigmoidMax - sigmoidMin);
     return 1 + totalLayerContrast * (0.5 - normalized);
   };
@@ -262,7 +262,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),
-    renderer: { name: 'relic-ortho-model-rasterizer', version: 2, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
+    renderer: { name: 'relic-ortho-model-rasterizer', version: 3, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
   };
 }
 
