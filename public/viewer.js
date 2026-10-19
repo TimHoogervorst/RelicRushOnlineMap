@@ -1,3 +1,7 @@
+import { markerScale } from './marker-sizing.js';
+import { mountPlayerTracking } from './player-tracking.js';
+let playerUI = null;
+import { sectionPlacement, currentSectionDirection, sectionDirections } from './section-placement.js';
 const viewport = document.querySelector('#viewport');
 const frame = document.querySelector('#map-frame');
 const image = document.querySelector('#map');
@@ -12,7 +16,39 @@ let zoom = 1, offsetX = 0, offsetY = 0, pointer = null, slicePreviewActive = fal
 const mapPointers = new Map();
 let pinch = null, suppressMapClick = false;
 
-function drawTransform() { frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`; }
+let markerMinimumSize = 24;
+try {
+  const saved = Number(localStorage.getItem('rr-marker-minimum-size'));
+  if (Number.isFinite(saved) && saved >= 16 && saved <= 40) markerMinimumSize = saved;
+} catch { /* Browser storage is optional. */ }
+const markerSizeControl = document.querySelector('#marker-size');
+function updateMarkerSizeLabel() {
+  document.querySelector('#marker-size-value').textContent = `${markerMinimumSize}px minimum ? 48px maximum`;
+}
+markerSizeControl.value = String(markerMinimumSize);
+updateMarkerSizeLabel();
+markerSizeControl.addEventListener('input', () => {
+  markerMinimumSize = Math.max(16, Math.min(40, Number(markerSizeControl.value) || 24));
+  updateMarkerSizeLabel(); drawTransform();
+  try { localStorage.setItem('rr-marker-minimum-size', String(markerMinimumSize)); } catch { /* Browser storage is optional. */ }
+});
+let exitMinimumSize = 24;
+try {
+  const saved = Number(localStorage.getItem('rr-exit-minimum-size'));
+  if (Number.isFinite(saved) && saved >= 16 && saved <= 40) exitMinimumSize = saved;
+} catch { /* Browser storage is optional. */ }
+const exitSizeControl = document.querySelector('#exit-size');
+function updateExitSizeLabel() {
+  document.querySelector('#exit-size-value').textContent = `${exitMinimumSize}px minimum / 48px maximum`;
+}
+exitSizeControl.value = String(exitMinimumSize);
+updateExitSizeLabel();
+exitSizeControl.addEventListener('input', () => {
+  exitMinimumSize = Math.max(16, Math.min(40, Number(exitSizeControl.value) || 24));
+  updateExitSizeLabel(); drawTransform();
+  try { localStorage.setItem('rr-exit-minimum-size', String(exitMinimumSize)); } catch { /* Browser storage is optional. */ }
+});
+function drawTransform() { frame.style.setProperty('--exit-scale', String(markerScale(zoom, exitMinimumSize))); frame.style.setProperty('--marker-scale', String(markerScale(zoom, markerMinimumSize))); frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`; }
 function fitFloor() {
   if (!image.naturalWidth) return;
   let minX = 0, minY = 0, maxX = image.naturalWidth, maxY = image.naturalHeight;
@@ -22,13 +58,17 @@ function fitFloor() {
     const x = (section.placementX + section.labelX) * pixels, y = (depth - 1 - section.placementZ - section.labelZ) * pixels;
     const halfWidth = Math.max(17, section.name.length * 3.5 + 8); include(x - halfWidth, y - 14); include(x + halfWidth, y + 14);
   }
-  for (const marker of floorManifest?.markers ?? []) include(marker.x * pixels, marker.z * pixels);
+  for (const marker of floorManifest?.markers ?? []) include(marker.x * pixels, markerScreenZ(marker) * pixels);
   for (const link of floorManifest?.connections ?? []) {
-    for (const point of [link.displayA, link.displayB]) include(point.x * pixels, (depth - 1 - point.z) * pixels);
-    if (link.label) {
+    for (const point of [link.displayA, link.displayB].filter(Boolean)) include(point.x * pixels, (depth - point.z) * pixels);
+    if (link.label && link.displayA && link.displayB) {
       const x = (link.displayA.x + link.displayB.x) * pixels / 2, y = (depth - 1 - (link.displayA.z + link.displayB.z) / 2) * pixels;
       include(x - link.label.length * 3.5, y - 12); include(x + link.label.length * 3.5, y + 3);
     }
+  }
+  for (const exit of floorManifest?.exits ?? []) {
+    const x = exit.x * pixels, y = (depth - exit.z) * pixels;
+    include(x - exit.name.length * 3.5, y - 26); include(x + exit.name.length * 3.5, y + 30);
   }
   const width = maxX - minX, height = maxY - minY;
   zoom = Math.min((viewport.clientWidth - 64) / width, (viewport.clientHeight - 64) / height, 1.5);
@@ -42,7 +82,7 @@ function setZoom(value, anchorX = viewport.clientWidth / 2, anchorY = viewport.c
   const cx = anchorX - (rect.left + rect.width / 2), cy = anchorY - (rect.top + rect.height / 2);
   offsetX += cx * (1 - next / zoom); offsetY += cy * (1 - next / zoom); zoom = next; drawTransform();
 }
-document.querySelector('#fit').addEventListener('click', fitFloor);
+document.querySelector('#fit').addEventListener('click', () => { playerUI?.stop(); fitFloor(); });
 document.querySelector('#zoom-in').addEventListener('click', () => setZoom(zoom * 1.25));
 document.querySelector('#zoom-out').addEventListener('click', () => setZoom(zoom / 1.25));
 viewport.addEventListener('wheel', event => {
@@ -55,7 +95,7 @@ viewport.addEventListener('wheel', event => {
   setZoom(zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX, event.clientY);
 }, { passive: false });
 viewport.addEventListener('pointerdown', event => {
-  if (event.target.closest('.map-marker, .section-label, #marker-popup, #cell-popup, #block-inspector')) return;
+  if (event.target.closest('.map-marker, .section-label, .section-connection-target, #marker-popup, #cell-popup, #block-inspector')) return;
   mapPointers.set(event.pointerId, { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, target: event.target, moved: false, shiftKey: event.shiftKey });
   viewport.setPointerCapture(event.pointerId);
   if (mapPointers.size === 1) {
@@ -78,6 +118,7 @@ viewport.addEventListener('pointermove', event => {
   const previousX = moved.x, previousY = moved.y;
   moved.x = event.clientX; moved.y = event.clientY;
   if (mapPointers.size === 1 && pointer?.id === event.pointerId) {
+    if (moved.moved) playerUI?.stop();
     offsetX += event.clientX - previousX; offsetY += event.clientY - previousY;
     drawTransform();
     return;
@@ -116,13 +157,15 @@ function endPointer(event) {
   }
 }
 viewport.addEventListener('pointerup', endPointer); viewport.addEventListener('pointercancel', endPointer); viewport.addEventListener('lostpointercapture', endPointer);
-image.addEventListener('load', () => { if (!slicePreviewActive) fitFloor(); if (pendingCenterMarker) { const target = pendingCenterMarker; pendingCenterMarker = null; centerMarker(target); } renderSelection(); });
+image.addEventListener('load', () => { if (!slicePreviewActive && !playerUI?.following) fitFloor(); if (pendingCenterMarker) { const target = pendingCenterMarker; pendingCenterMarker = null; centerMarker(target); } renderSelection(); });
 
 let editorOpen = false, editorAuthenticated = false, sidebarOpen = !window.matchMedia('(max-width: 600px)').matches, projectRevision = 0, publicMap = null, floorManifest = null, markerDrag = null, highlightedMarker = null, pendingCenterMarker = null;
 let initialMarkerSection = null, initialMarkerDisplay = null;
 let blockCatalog = [], paletteChoice = null, inspectedBlock = null, inspectedSection = null, inspectedCoords = null;
 let selectedBlocks = [], pendingMoveDelta = 0, visibleHeight = 256, sliceMaximum = 256, slicePreviewTimer = null;
-let layoutPreviewTimer = null, layoutConflicts = [];
+let blockMoveBusy = false;
+let layoutConflicts = [];
+let importSections = [];
 const builtInMarkerTypes = [
   { id: 'chest', name: 'Chests', color: '#d89032', icon: 'minecraft:chest', builtIn: true },
   { id: 'relic', name: 'Relics', color: '#a478d0', icon: 'minecraft:diamond', builtIn: true },
@@ -165,7 +208,8 @@ async function saveProject() {
   } catch (error) { setSaveStatus({ state: 'failed', error: error.message }); }
   finally { clearInterval(poll); }
 }
-async function loadFloor(floorId) {
+async function loadFloor(floorId, { following = false } = {}) {
+  if (!following) playerUI?.stop();
   const response = await fetch(`/api/map/manifest?floor=${encodeURIComponent(floorId)}`, { cache: 'no-store' });
   if (!response.ok) throw new Error('The saved floor is unavailable.');
   floorManifest = await response.json();
@@ -203,32 +247,8 @@ function renderSectionLabels() {
     const label = document.createElement('button'); label.type = 'button'; label.className = `section-label${section.id === selectedId ? ' selected' : ''}`; label.dataset.sectionId = section.id; label.textContent = section.name;
     label.style.left = `${(section.placementX + section.labelX) * pixels}px`;
     label.style.top = `${(depth - 1 - section.placementZ - section.labelZ) * pixels}px`;
-    label.title = 'Drag to move this whole section in snapped blocks';
+    label.title = 'Select this section to choose its position';
     label.addEventListener('click', event => { event.stopPropagation(); selector.value = section.id; renderSectionLabels(); populateSectionLayout(); });
-    label.addEventListener('pointerdown', event => {
-      if (!editorOpen || !editorAuthenticated) return;
-      event.stopPropagation(); event.preventDefault(); label.setPointerCapture(event.pointerId);
-      selector.value = section.id; layer.querySelectorAll('.section-label').forEach(item => item.classList.toggle('selected', item.dataset.sectionId === section.id)); populateSectionLayout();
-      label.dataset.drag = JSON.stringify({ pointerId: event.pointerId, x: event.clientX, y: event.clientY, placementX: section.placementX, placementZ: section.placementZ });
-    });
-    label.addEventListener('pointermove', event => {
-      if (!label.dataset.drag) return;
-      const drag = JSON.parse(label.dataset.drag); if (drag.pointerId !== event.pointerId) return;
-      const dx = Math.round((event.clientX - drag.x) / (pixels * zoom));
-      const dz = -Math.round((event.clientY - drag.y) / (pixels * zoom));
-      label.style.left = `${(section.placementX + section.labelX + dx) * pixels}px`;
-      label.style.top = `${(depth - 1 - section.placementZ - section.labelZ - dz) * pixels}px`;
-      scheduleLayoutPreview(section.id, section.placementX + dx, section.placementZ + dz);
-    });
-    const finishDrag = async event => {
-      if (!label.dataset.drag) return;
-      const drag = JSON.parse(label.dataset.drag); if (drag.pointerId !== event.pointerId) return;
-      label.dataset.drag = '';
-      const dx = Math.round((event.clientX - drag.x) / (pixels * zoom)), dz = -Math.round((event.clientY - drag.y) / (pixels * zoom));
-      if (dx || dz) await saveSectionLayout(section, { placementX: drag.placementX + dx, placementZ: drag.placementZ + dz });
-      else renderSectionLabels();
-    };
-    label.addEventListener('pointerup', finishDrag); label.addEventListener('pointercancel', finishDrag);
     layer.append(label);
   }
   populateSectionLayout();
@@ -237,20 +257,25 @@ function renderSectionLabels() {
 function selectedLayoutSection() { return floorManifest?.sections.find(section => section.id === document.querySelector('#layout-section').value) ?? null; }
 function populateSectionLayout() {
   const section = selectedLayoutSection(); if (!section) return;
-  document.querySelector('#section-x').value = section.placementX;
-  document.querySelector('#section-z').value = section.placementZ;
+  const middle = floorManifest.sections[0];
+  const position = document.querySelector('#section-position');
+  position.replaceChildren(...(section.id === middle.id
+    ? [new Option('Middle', 'middle')]
+    : [new Option('Choose position', ''), ...sectionDirections.map(direction => new Option(direction.replaceAll('-', ' '), direction))]));
+  position.disabled = section.id === middle.id;
+  position.value = currentSectionDirection(floorManifest.sections, section.id);
+  document.querySelector('#section-position-help').textContent = section.id === middle.id
+    ? 'This is the middle section. Place other sections around it.'
+    : 'Position relative to ' + middle.name + ' (middle). A small gap keeps sections separate.';
   document.querySelector('#section-label-x').value = section.labelX;
   document.querySelector('#section-label-z').value = section.labelZ;
   const settings = section.renderSettings ?? { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018 };
   document.querySelector('#render-cutaway').value = settings.cutaways.map(box => [box.x,box.y,box.z,box.width,box.height,box.depth].join(',')).join('\n');
   document.querySelector('#render-excluded').value = [...new Set([...defaultHiddenBlocks, ...settings.excludedBlocks])].join(', ');
   document.querySelector('#render-pixel-size').value = settings.pixelSize;
-  const shadeStrength = Math.round(settings.heightShadePerBlock * 2000);
-  document.querySelector('#render-height-shade').value = shadeStrength;
-  document.querySelector('#render-height-shade-value').value = `${shadeStrength}%`;
-  document.querySelector('#render-height-shade-min-y').value = settings.heightShadeMinY ?? '';
-  document.querySelector('#render-height-shade-max-y').value = settings.heightShadeMaxY ?? '';
-  document.querySelector('#render-height-shade-multiplier').value = settings.heightShadeMultiplier ?? 1;
+  const strength = Math.min(10, (settings.heightShadePerBlock ?? 0.018) / 0.018 * (settings.heightShadeMultiplier ?? 1));
+  document.querySelector('#render-height-shade-multiplier').value = Math.round(strength * 100) / 100;
+  document.querySelector('#render-surface-shade-multiplier').value = settings.surfaceShadeMultiplier ?? 0;
 }
 function readRenderSettings() {
   const lines = document.querySelector('#render-cutaway').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -259,9 +284,7 @@ function readRenderSettings() {
     if (values.length !== 6 || values.some(value => !Number.isSafeInteger(value))) throw new Error('Each cutaway line needs six whole numbers: x,y,z,width,height,depth.');
     const [x,y,z,width,height,depth] = values; return { x,y,z,width,height,depth };
   });
-  const minYValue = document.querySelector('#render-height-shade-min-y').value;
-  const maxYValue = document.querySelector('#render-height-shade-max-y').value;
-  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: Number(document.querySelector('#render-height-shade').value) / 2000, heightShadeMinY: minYValue === '' ? null : Number(minYValue), heightShadeMaxY: maxYValue === '' ? null : Number(maxYValue), heightShadeMultiplier: Number(document.querySelector('#render-height-shade-multiplier').value) };
+  return { cutaways, excludedBlocks: document.querySelector('#render-excluded').value.split(',').map(value => value.trim()).filter(Boolean), pixelSize: Number(document.querySelector('#render-pixel-size').value), heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: Number(document.querySelector('#render-height-shade-multiplier').value), surfaceShadeMultiplier: Number(document.querySelector('#render-surface-shade-multiplier').value) };
 }
 async function saveRenderSettings(status = document.querySelector('#render-settings-status')) {
   const section = selectedLayoutSection(); if (!section) return;
@@ -271,22 +294,17 @@ async function saveRenderSettings(status = document.querySelector('#render-setti
     const result = await response.json();
     if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
     projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
-    if (!result.saved) { status.textContent = `${status.id === 'render-shade-status' ? 'Shading' : 'Settings'} retained; ${result.warning}. Change the slider to retry.`; return; }
+    if (!result.saved) { status.textContent = `${status.id === 'render-shade-status' ? 'Shading' : 'Settings'} retained; ${result.warning}. Change the strength to retry.`; return; }
     const shadeDraft = status.id === 'render-shade-status' ? {
-      strength: document.querySelector('#render-height-shade').value,
-      minY: document.querySelector('#render-height-shade-min-y').value,
-      maxY: document.querySelector('#render-height-shade-max-y').value,
-      multiplier: document.querySelector('#render-height-shade-multiplier').value
+      multiplier: document.querySelector('#render-height-shade-multiplier').value,
+      surface: document.querySelector('#render-surface-shade-multiplier').value
     } : null;
-    const shadeChangedWhileSaving = shadeDraft && (shadeDraft.strength !== String(Math.round(settings.heightShadePerBlock * 2000)) || shadeDraft.minY !== String(settings.heightShadeMinY ?? '') || shadeDraft.maxY !== String(settings.heightShadeMaxY ?? '') || shadeDraft.multiplier !== String(settings.heightShadeMultiplier ?? 1));
+    const shadeChangedWhileSaving = shadeDraft && (shadeDraft.multiplier !== String(settings.heightShadeMultiplier ?? 1) || shadeDraft.surface !== String(settings.surfaceShadeMultiplier ?? 0));
     status.textContent = status.id === 'render-shade-status' ? 'Shading saved. The map was regenerated.' : 'Render settings saved. The visitor map was regenerated.';
     await loadFloor(floorManifest.id);
     if (shadeChangedWhileSaving) {
-      document.querySelector('#render-height-shade').value = shadeDraft.strength;
-      document.querySelector('#render-height-shade-value').value = `${shadeDraft.strength}%`;
-      document.querySelector('#render-height-shade-min-y').value = shadeDraft.minY;
-      document.querySelector('#render-height-shade-max-y').value = shadeDraft.maxY;
       document.querySelector('#render-height-shade-multiplier').value = shadeDraft.multiplier;
+      document.querySelector('#render-surface-shade-multiplier').value = shadeDraft.surface;
     }
     await refreshSaveStatus();
   } catch (error) { status.textContent = error.message; }
@@ -297,8 +315,7 @@ function queueRenderSettingsSave(status = document.querySelector('#render-settin
   return renderSettingsSaveQueue;
 }
 document.querySelector('#render-settings-save').addEventListener('click', () => void queueRenderSettingsSave());
-document.querySelector('#render-height-shade').addEventListener('input', event => { document.querySelector('#render-height-shade-value').value = `${event.target.value}%`; });
-for (const id of ['render-height-shade', 'render-height-shade-min-y', 'render-height-shade-max-y', 'render-height-shade-multiplier']) {
+for (const id of ['render-height-shade-multiplier', 'render-surface-shade-multiplier']) {
   document.querySelector(`#${id}`).addEventListener('change', () => void queueRenderSettingsSave(document.querySelector('#render-shade-status')));
 }
 async function renderSettingsHistory(direction) {
@@ -322,24 +339,14 @@ function renderLayoutConflicts() {
     rect.setAttribute('width', String(pixels)); rect.setAttribute('height', String(pixels)); rect.setAttribute('class', 'layout-conflict'); svg.append(rect);
   }
 }
-function scheduleLayoutPreview(sectionId = selectedLayoutSection()?.id, placementX = Number(document.querySelector('#section-x').value), placementZ = Number(document.querySelector('#section-z').value)) {
-  if (!editorAuthenticated || !sectionId || !Number.isSafeInteger(placementX) || !Number.isSafeInteger(placementZ)) return;
-  clearTimeout(layoutPreviewTimer);
-  layoutPreviewTimer = setTimeout(async () => {
-    const origin = floorManifest.coordinateOrigin ?? { x: 0, z: 0 };
-    const query = new URLSearchParams({ placementX: String(placementX + origin.x), placementZ: String(placementZ + origin.z) });
-    const response = await fetch(`/api/project/sections/${encodeURIComponent(sectionId)}/layout-preview?${query}`);
-    if (!response.ok) return;
-    layoutConflicts = (await response.json()).conflicts; renderLayoutConflicts();
-    document.querySelector('#section-layout-status').textContent = layoutConflicts.length ? `${layoutConflicts.length} occupied block conflict${layoutConflicts.length === 1 ? '' : 's'} highlighted. Move the section before saving.` : 'No occupied placement conflicts.';
-  }, 90);
-}
 async function saveSectionLayout(section = selectedLayoutSection(), values = null) {
   if (!section) return;
   const status = document.querySelector('#section-layout-status'); status.textContent = 'Checking section placement and saving floor…';
-  const input = values ?? { placementX: Number(document.querySelector('#section-x').value), placementZ: Number(document.querySelector('#section-z').value), labelX: Number(document.querySelector('#section-label-x').value), labelZ: Number(document.querySelector('#section-label-z').value) };
-  const origin = floorManifest.coordinateOrigin ?? { x: 0, z: 0 };
-  const response = await fetch(`/api/project/sections/${encodeURIComponent(section.id)}/layout`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, ...input, placementX: input.placementX + origin.x, placementZ: input.placementZ + origin.z }) });
+  let input;
+  try {
+    input = values ?? { ...sectionPlacement(floorManifest.sections, section.id, document.querySelector('#section-position').value, floorManifest.coordinateOrigin), labelX: Number(document.querySelector('#section-label-x').value), labelZ: Number(document.querySelector('#section-label-z').value) };
+  } catch (error) { status.textContent = error.message; return false; }
+  const response = await fetch(`/api/project/sections/${encodeURIComponent(section.id)}/layout`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, ...input }) });
   const result = await response.json();
   if (!response.ok && response.status !== 202) { status.textContent = result.error; renderSectionLabels(); return false; }
   projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
@@ -384,8 +391,10 @@ async function submitSectionTransform(direction = null) {
 document.querySelector('#section-transform-apply').addEventListener('click', () => void submitSectionTransform());
 document.querySelector('#section-transform-undo').addEventListener('click', () => void submitSectionTransform('undo'));
 document.querySelector('#section-transform-redo').addEventListener('click', () => void submitSectionTransform('redo'));
-for (const id of ['section-x', 'section-z']) document.querySelector(`#${id}`).addEventListener('input', () => scheduleLayoutPreview());
 function renderSelection() {
+  for (const id of ['terrain-block-up', 'terrain-block-down']) document.querySelector(`#${id}`).disabled = blockMoveBusy || !selectedBlocks.length || !inspectedSection;
+  document.querySelector('#block-commit-move').disabled = blockMoveBusy || !selectedBlocks.length || !pendingMoveDelta;
+  document.querySelector('#terrain-selection-status').textContent = selectedBlocks.length ? `${selectedBlocks.length} blocks selected` : 'Select blocks on the map first. Shift-click to select several.';
   const svg = document.querySelector('#block-selection');
   if (!svg || !floorManifest) return;
   const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1;
@@ -405,7 +414,7 @@ function renderSelection() {
   document.querySelector('#block-selection-status').textContent = selectedBlocks.length
     ? `${selectedBlocks.length} selected · local Y ${Math.min(...ys)} to ${Math.max(...ys)}${pendingMoveDelta ? ` · proposed Y ${Math.min(...ys) + pendingMoveDelta} to ${Math.max(...ys) + pendingMoveDelta}` : ''}`
     : 'No group selected.';
-  document.querySelector('#block-commit-move').disabled = !selectedBlocks.length || !pendingMoveDelta;
+  document.querySelector('#block-commit-move').disabled = blockMoveBusy || !selectedBlocks.length || !pendingMoveDelta;
   document.querySelector('#block-cancel-move').hidden = !pendingMoveDelta;
 }
 function updateSlicePreview() {
@@ -505,9 +514,11 @@ function blockTargetAt(clientX, clientY) {
   return { section, x: screenX - section.placementX, y: 0, z: depth - 1 - screenZ - section.placementZ, screenX, screenZ };
 }
 async function inspectBlockAt(clientX, clientY, additive = false) {
+  if (blockMoveBusy) return;
   const target = blockTargetAt(clientX, clientY); if (!target) return;
   try {
     const response = await fetch(`/api/project/sections/${encodeURIComponent(target.section.id)}/blocks`); const data = await response.json();
+    if (blockMoveBusy) return;
     if (!response.ok) throw new Error(data.error);
     const top = data.blocks.filter(block => block.y <= visibleHeight && block.x + target.section.placementX === target.screenX && floorManifest.bounds.depth - 1 - block.z - target.section.placementZ === target.screenZ).sort((a, b) => b.y - a.y)[0] ?? null;
     if (!additive || inspectedSection?.id !== target.section.id) { selectedBlocks = []; pendingMoveDelta = 0; }
@@ -559,21 +570,46 @@ document.querySelector('#block-redo').addEventListener('click', () => void block
 document.querySelector('#block-slice').addEventListener('input', updateSlicePreview);
 document.querySelector('#block-clear-selection').addEventListener('click', () => { selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); });
 document.querySelector('#block-cancel-move').addEventListener('click', () => { pendingMoveDelta = 0; renderSelection(); });
-document.querySelector('#block-commit-move').addEventListener('click', async () => {
-  if (!selectedBlocks.length || !pendingMoveDelta || !inspectedSection) return;
-  const status = document.querySelector('#block-selection-status'); status.textContent = 'Moving selected blocks and regenerating the floor…';
-  const response = await fetch('/api/project/block-moves', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, sectionId: inspectedSection.id, blocks: selectedBlocks.map(({ x, y, z }) => ({ x, y, z })), dy: pendingMoveDelta }) });
-  const result = await response.json();
-  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
-  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
-  if (!result.saved) { status.textContent = `Move retained; ${result.warning}. Use Save to retry.`; return; }
+function setBlockMoveStatus(text) {
+  document.querySelector('#block-selection-status').textContent = text;
+  document.querySelector('#terrain-selection-status').textContent = text;
+}
+async function moveSelectedBlocks(dy) {
+  if (blockMoveBusy || !selectedBlocks.length || !dy || !inspectedSection) return;
   const floorId = document.querySelector('#floor').value;
-  await loadFloor(floorId);
-  selectedBlocks = result.after; inspectedSection = floorManifest.sections.find(item => item.id === result.sectionId) ?? null; pendingMoveDelta = 0;
-  if (inspectedSection) { const block = selectedBlocks[0]; inspectedCoords = { sectionId: result.sectionId, x: block.x, y: block.y, z: block.z }; inspectedBlock = block; }
-  if (visibleHeight < sliceMaximum) updateSlicePreview(); else renderSelection();
-  await refreshSaveStatus();
-});
+  blockMoveBusy = true;
+  renderSelection();
+  setBlockMoveStatus('Moving selected blocks and regenerating the floor…');
+  let outcome = '';
+  try {
+    const response = await fetch('/api/project/block-moves', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, sectionId: inspectedSection.id, blocks: selectedBlocks.map(({ x, y, z }) => ({ x, y, z })), dy }) });
+    const result = await response.json();
+    if (!response.ok && response.status !== 202) throw new Error(result.error);
+    projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+    // Geometry is committed even when image generation fails. Retain its new
+    // coordinates so another click never submits stale source positions.
+    if (document.querySelector('#floor').value !== floorId) return;
+    selectedBlocks = result.after; pendingMoveDelta = 0;
+    const block = selectedBlocks[0];
+    inspectedCoords = { sectionId: result.sectionId, x: block.x, y: block.y, z: block.z }; inspectedBlock = block;
+    document.querySelector('#block-coordinate').textContent = inspectedSection.name + ' · local X ' + block.x + ', Y ' + block.y + ', Z ' + block.z;
+    document.querySelector('#cell-popup').hidden = true;
+    if (!result.saved) { outcome = 'Move retained; ' + result.warning + '. Use Save to retry.'; return; }
+    await loadFloor(floorId);
+    inspectedSection = floorManifest.sections.find(item => item.id === result.sectionId) ?? null;
+    if (visibleHeight < sliceMaximum) updateSlicePreview();
+    await refreshSaveStatus();
+    outcome = selectedBlocks.length + ' blocks moved ' + (dy > 0 ? 'up' : 'down') + ' ' + Math.abs(dy) + '. Selection retained.';
+  } catch (error) { outcome = error.message; }
+  finally {
+    blockMoveBusy = false;
+    renderSelection();
+    if (outcome) setBlockMoveStatus(outcome);
+  }
+}
+document.querySelector('#block-commit-move').addEventListener('click', () => void moveSelectedBlocks(pendingMoveDelta));
+document.querySelector('#terrain-block-up').addEventListener('click', () => void moveSelectedBlocks(1));
+document.querySelector('#terrain-block-down').addEventListener('click', () => void moveSelectedBlocks(-1));
 viewport.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('application/x-minecraft-block')) event.preventDefault(); });
 viewport.addEventListener('drop', async event => {
   const id = event.dataTransfer.getData('application/x-minecraft-block'); if (!id || !editorOpen) return;
@@ -588,49 +624,92 @@ function renderConnections() {
   if (!floorManifest) return;
   const svg = document.querySelector('#section-connections');
   const pixels = floorManifest.renderer?.pixelSize ?? 16, depth = floorManifest.bounds?.depth ?? 1;
-  svg.setAttribute('viewBox', `0 0 ${image.naturalWidth || image.width} ${image.naturalHeight || image.height}`);
+  svg.setAttribute('viewBox', `0 0 ${floorManifest.bounds.width * pixels} ${depth * pixels}`);
   svg.replaceChildren();
   for (const connection of floorManifest.connections ?? []) {
-    const ax = connection.displayA.x * pixels, ay = (depth - 1 - connection.displayA.z) * pixels;
-    const bx = connection.displayB.x * pixels, by = (depth - 1 - connection.displayB.z) * pixels;
+    if (!connection.displayA || !connection.displayB) continue;
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    line.setAttribute('x1', String(ax)); line.setAttribute('y1', String(ay)); line.setAttribute('x2', String(bx)); line.setAttribute('y2', String(by)); line.setAttribute('class', 'section-connection-line');
-    line.dataset.connectionId = connection.id; svg.append(line);
-    for (const [x, y] of [[ax, ay], [bx, by]]) {
-      const endpoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      endpoint.setAttribute('cx', String(x)); endpoint.setAttribute('cy', String(y)); endpoint.setAttribute('r', '10'); endpoint.setAttribute('class', 'section-connection-endpoint'); svg.append(endpoint);
-      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-      icon.setAttribute('x', String(x - 7)); icon.setAttribute('y', String(y - 7)); icon.setAttribute('width', '14'); icon.setAttribute('height', '14'); icon.setAttribute('href', inventoryIcon(connection.icon || 'minecraft:oak_stairs')); icon.setAttribute('class', 'section-connection-icon'); svg.append(icon);
-      icon.addEventListener('error', () => icon.setAttribute('href', '/icons/stairs.svg'), { once: true });
+    for (const [index, point] of [connection.displayA, connection.displayB].entries()) {
+      line.setAttribute(`x${index + 1}`, String(point.x * pixels));
+      line.setAttribute(`y${index + 1}`, String((depth - point.z) * pixels));
     }
-    if (connection.label) {
-      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      label.setAttribute('x', String((ax + bx) / 2)); label.setAttribute('y', String((ay + by) / 2 - 8)); label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'section-connection-label'); label.textContent = connection.label; svg.append(label);
+    line.setAttribute('class', 'section-connection-line'); svg.append(line);
+  }
+  for (const exit of floorManifest.exits ?? []) {
+    const x = exit.x * pixels, y = (depth - exit.z) * pixels;
+    const target = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    target.setAttribute('class', 'section-connection-target'); target.dataset.exitId = exit.id;
+    target.style.transformOrigin = `${x}px ${y}px`;
+    target.setAttribute('tabindex', '0'); target.setAttribute('role', 'button');
+    target.setAttribute('aria-label', exit.name);
+    const crossFloor = exit.destinationFloorId && exit.destinationFloorId !== floorManifest.id;
+    const activate = event => {
+      event.preventDefault(); event.stopPropagation();
+      if (editorOpen && editorAuthenticated) {
+        selectedExitId = exit.id; pendingExit = null; openEditorSection('Exits'); renderExitEditor();
+      } else if (crossFloor) void followExit(exit);
+    };
+    target.addEventListener('click', activate);
+    target.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') activate(event); });
+    const endpoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    endpoint.setAttribute('cx', String(x)); endpoint.setAttribute('cy', String(y)); endpoint.setAttribute('r', '14');
+    endpoint.setAttribute('class', 'section-connection-endpoint'); target.append(endpoint);
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', String(x)); label.setAttribute('y', String(y - 22));
+    label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'section-connection-label');
+    label.textContent = exit.name; target.append(label);
+    if (crossFloor) {
+      const to = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      to.setAttribute('x', String(x)); to.setAttribute('y', String(y + 31));
+      to.setAttribute('text-anchor', 'middle'); to.setAttribute('class', 'section-connection-label');
+      const floor = publicMap?.floors?.find(floor => floor.id === exit.destinationFloorId);
+      to.textContent = `To ? ${exit.destinationName} (${floor?.name ?? 'Other floor'})`;
+      to.setAttribute('tabindex', '0'); to.setAttribute('role', 'link');
+      to.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); void followExit(exit); });
+      to.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); void followExit(exit); } });
+      target.append(to);
     }
+    svg.append(target);
   }
-  const select = document.querySelector('#connection-select'), previousId = select.value;
-  select.replaceChildren(new Option('New connection', ''), ...(floorManifest.connections ?? []).map(item => new Option(item.label || `${sectionName(item.sectionAId)} ↔ ${sectionName(item.sectionBId)}`, item.id)));
-  if ((floorManifest.connections ?? []).some(item => item.id === previousId)) select.value = previousId;
-  const sections = floorManifest.sections ?? [];
-  for (const id of ['connection-a', 'connection-b']) {
-    const sectionSelect = document.querySelector(`#${id}`), previousSection = sectionSelect.value;
-    sectionSelect.replaceChildren(...sections.map(section => new Option(section.name, section.id)));
-    if (sections.some(section => section.id === previousSection)) sectionSelect.value = previousSection;
-  }
-  const selected = (floorManifest.connections ?? []).find(item => item.id === select.value);
-  const form = document.querySelector('#connection-form');
-  document.querySelector('#connection-delete').hidden = !selected;
-  if (selected && document.activeElement !== form.querySelector('input:focus')) {
-    document.querySelector('#connection-a').value = selected.sectionAId; document.querySelector('#connection-b').value = selected.sectionBId;
-    for (const [id, value] of [['connection-x-a', selected.xA], ['connection-z-a', selected.zA], ['connection-x-b', selected.xB], ['connection-z-b', selected.zB], ['connection-label', selected.label], ['connection-icon', selected.icon || 'minecraft:oak_stairs']]) document.querySelector(`#${id}`).value = value;
-  }
-  if (!selected) {
-    if (sections.length > 1 && document.querySelector('#connection-a').value === document.querySelector('#connection-b').value) document.querySelector('#connection-b').selectedIndex = 1;
-    for (const id of ['connection-x-a', 'connection-z-a', 'connection-x-b', 'connection-z-b']) if (!document.querySelector(`#${id}`).value) document.querySelector(`#${id}`).value = '0.5';
-  }
+  renderExitEditor();
 }
-function sectionName(id) { return floorManifest?.sections.find(section => section.id === id)?.name ?? 'Section'; }
+async function followExit(exit) {
+  await refreshPublicManifest();
+  const floor = publicMap?.floors?.find(floor => floor.exits?.some(item => item.id === exit.destinationId));
+  const destination = floor?.exits?.find(item => item.id === exit.destinationId);
+  if (!destination) { message.textContent = 'The destination exit is unavailable.'; message.hidden = false; return; }
+  await followConnection({ sectionBId: destination.sectionId, xB: destination.localX, zB: destination.localZ }, 'B');
+}
+function sectionName(id) {
+  for (const floor of publicMap?.floors ?? []) {
+    const section = floor.sections?.find(section => section.id === id);
+    if (section) return `${floor.name} / ${section.name}`;
+  }
+  return 'Section';
+}
+async function followConnection(connection, side) {
+  try {
+    await refreshPublicManifest();
+    const floor = publicMap?.floors?.find(floor => floor.sections?.some(section => section.id === connection[`section${side}Id`]));
+    const section = floor?.sections?.find(section => section.id === connection[`section${side}Id`]);
+    if (!section) throw new Error('The destination section is unavailable.');
+    const destination = { x: section.placementX + connection[`x${side}`], z: section.placementZ + connection[`z${side}`] };
+    document.querySelector('#marker-popup').hidden = true;
+    document.querySelector('#cell-popup').hidden = true;
+    if (floor.id !== floorManifest.id) {
+      document.querySelector('#floor').value = floor.id;
+      pendingCenterMarker = destination;
+      await loadFloor(floor.id);
+    } else centerMarker(destination);
+    document.querySelector('#layout-section').value = section.id;
+  } catch (error) { pendingCenterMarker = null; message.textContent = error.message; message.hidden = false; }
+}
 
+// Stored marker coordinates are continuous section/floor coordinates. The
+// overhead raster runs from high Z at the top to low Z at the bottom.
+function markerScreenZ(marker) {
+  return floorManifest.bounds.depth - marker.z;
+}
 function renderMarkers() {
   if (!floorManifest) return;
   const markers = floorManifest.markers ?? [];
@@ -641,7 +720,7 @@ function renderMarkers() {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'map-marker'; button.dataset.markerId = marker.id;
     button.dataset.type = marker.type;
-    button.style.left = `${marker.x * pixels}px`; button.style.top = `${marker.z * pixels}px`;
+    button.style.left = `${marker.x * pixels}px`; button.style.top = `${markerScreenZ(marker) * pixels}px`;
     const type = markerType(marker.type);
     const icon = document.createElement('img'); icon.alt = ''; icon.src = inventoryIcon(marker.icon || type.icon);
     icon.addEventListener('error', () => { icon.src = `/icons/${legacyIcons[marker.type]?.replace('minecraft:', '') ?? marker.type}.svg`; }, { once: true });
@@ -656,7 +735,7 @@ function renderMarkers() {
       tooltip.replaceChildren();
       const strong = document.createElement('strong'); strong.textContent = marker.name;
       const kind = document.createElement('span'); kind.textContent = markerTitle(marker.type);
-      tooltip.append(strong, kind); tooltip.style.left = `${marker.x * pixels}px`; tooltip.style.top = `${marker.z * pixels - 22}px`; tooltip.hidden = false;
+      tooltip.append(strong, kind); tooltip.style.left = `${marker.x * pixels}px`; tooltip.style.top = `${markerScreenZ(marker) * pixels - 22}px`; tooltip.hidden = false;
     };
     button.addEventListener('pointerenter', showTooltip); button.addEventListener('pointerleave', () => { tooltip.hidden = true; });
     button.addEventListener('focus', showTooltip); button.addEventListener('blur', () => { tooltip.hidden = true; });
@@ -670,7 +749,7 @@ function renderMarkers() {
       document.querySelector('#popup-name').textContent = marker.name;
       const note = marker.type === 'stairs' && !marker.stairDestinationId ? 'Destination not yet mapped.' : '';
       document.querySelector('#popup-description').textContent = [marker.description, note].filter(Boolean).join('\n');
-      popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${marker.z * pixels + 14}px`; popup.hidden = false;
+      popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${markerScreenZ(marker) * pixels + 14}px`; popup.hidden = false;
     });
     button.addEventListener('pointerdown', event => {
       if (!editorOpen) return;
@@ -693,8 +772,8 @@ function renderMarkers() {
       const section = floorManifest.sections.find(item => item.id === marker.sectionId);
       if (!section) return;
       document.querySelector('#marker-section').value = section.id;
-      document.querySelector('#marker-x').value = (drag.displayX - section.placementX).toFixed(2);
-      document.querySelector('#marker-z').value = (drag.displayZ - section.placementZ).toFixed(2);
+      document.querySelector('#marker-x').value = (drag.displayX - section.placementX - 0.5).toFixed(2);
+      document.querySelector('#marker-z').value = (floorManifest.bounds.depth - drag.displayZ - section.placementZ - 0.5).toFixed(2);
       await persistMarker(marker.id);
     });
     layer.append(button);
@@ -736,40 +815,57 @@ function renderMarkers() {
   }
   if (!groups.childElementCount) groups.innerHTML = '<p>No markers on this floor.</p>';
 }
-function connectionFormValue() {
-  return { sectionAId: document.querySelector('#connection-a').value, xA: Number(document.querySelector('#connection-x-a').value), zA: Number(document.querySelector('#connection-z-a').value), sectionBId: document.querySelector('#connection-b').value, xB: Number(document.querySelector('#connection-x-b').value), zB: Number(document.querySelector('#connection-z-b').value), label: document.querySelector('#connection-label').value, icon: document.querySelector('#connection-icon').value || 'minecraft:oak_stairs' };
+let selectedExitId = '', pendingExit = null, exitBusy = false;
+function renderExitEditor() {
+  const exits = floorManifest?.exits ?? [];
+  const selected = exits.find(exit => exit.id === selectedExitId);
+  if (!selected) selectedExitId = '';
+  const select = document.querySelector('#exit-select');
+  select.replaceChildren(new Option(pendingExit ? 'New exit at selected block' : 'Choose an exit', ''), ...exits.map(exit => new Option(exit.name, exit.id)));
+  select.value = selectedExitId;
+  document.querySelector('#exit-name').value = selected?.name ?? pendingExit?.name ?? '';
+  document.querySelector('#exit-save').disabled = exitBusy || (!selected && !pendingExit);
+  const destination = document.querySelector('#exit-destination');
+  const choices = (publicMap?.floors ?? []).flatMap(floor => (floor.exits ?? [])
+    .filter(exit => exit.id !== selectedExitId && exit.sectionId !== selected?.sectionId && (!exit.connectionId || exit.id === selected?.destinationId))
+    .map(exit => new Option(`${floor.name} / ${sectionName(exit.sectionId).split(' / ').slice(1).join(' / ')} / ${exit.name}`, exit.id)));
+  destination.replaceChildren(new Option('Choose another exit', ''), ...choices);
+  destination.value = selected?.destinationId ?? '';
+  destination.disabled = exitBusy || !selected || Boolean(selected.connectionId);
+  document.querySelector('#exit-link').disabled = exitBusy || !selected || Boolean(selected.connectionId);
+  document.querySelector('#exit-unlink').disabled = exitBusy || !selected?.connectionId;
+  document.querySelector('#exit-delete').disabled = exitBusy || !selected;
 }
-document.querySelector('#connection-select').addEventListener('change', renderConnections);
-document.querySelector('#connection-new').addEventListener('click', () => { document.querySelector('#connection-select').value = ''; document.querySelector('#connection-delete').hidden = true; document.querySelector('#connection-x-a').value = '0.5'; document.querySelector('#connection-z-a').value = '0.5'; document.querySelector('#connection-x-b').value = '0.5'; document.querySelector('#connection-z-b').value = '0.5'; document.querySelector('#connection-label').value = ''; document.querySelector('#connection-icon').value = 'minecraft:oak_stairs'; if (floorManifest?.sections.length > 1) { document.querySelector('#connection-a').selectedIndex = 0; document.querySelector('#connection-b').selectedIndex = 1; } });
-document.querySelector('#connection-form').addEventListener('submit', async event => {
+async function mutateExit(url, method, body, success) {
+  if (exitBusy) return;
+  exitBusy = true;
+  const status = document.querySelector('#exit-status');
+  try {
+    const response = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, expectedRevision: projectRevision }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error ?? 'Could not save exit.');
+    projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
+    if (result.id && url === '/api/project/exits') { selectedExitId = result.id; pendingExit = null; }
+    status.textContent = result.saved ? success : `${success} Saved locally; ${result.warning}. Use Save to retry.`;
+    if (result.saved) { await refreshPublicManifest(); await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+  } catch (error) { status.textContent = error.message; }
+  finally { exitBusy = false; renderExitEditor(); }
+}
+document.querySelector('#exit-select').addEventListener('change', event => { selectedExitId = event.target.value; pendingExit = null; renderExitEditor(); });
+document.querySelector('#exit-form').addEventListener('submit', event => {
   event.preventDefault();
-  const status = document.querySelector('#connection-status'), id = document.querySelector('#connection-select').value;
-  const response = await fetch(id ? `/api/project/connections/${encodeURIComponent(id)}` : '/api/project/connections', { method: id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision, connection: connectionFormValue() }) });
-  const result = await response.json();
-  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
-  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' });
-  status.textContent = result.saved ? 'Connection saved.' : `Connection saved locally; ${result.warning}. Use Save to retry.`;
-  if (result.connection) document.querySelector('#connection-select').value = result.connection.id;
-  if (result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+  const name = document.querySelector('#exit-name').value.trim();
+  if (!selectedExitId && !pendingExit) return;
+  if (pendingExit) pendingExit.name = name;
+  void mutateExit(selectedExitId ? `/api/project/exits/${encodeURIComponent(selectedExitId)}` : '/api/project/exits', selectedExitId ? 'PUT' : 'POST', { exit: { ...pendingExit, name } }, 'Exit saved.');
 });
-document.querySelector('#connection-delete').addEventListener('click', async () => {
-  const id = document.querySelector('#connection-select').value;
-  if (!id) return;
-  const response = await fetch(`/api/project/connections/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
-  const result = await response.json(), status = document.querySelector('#connection-status');
-  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
-  projectRevision = result.revision; document.querySelector('#connection-select').value = ''; status.textContent = 'Connection deleted.';
-  setSaveStatus(result.status ?? { state: 'saved' }); if (result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
+document.querySelector('#exit-link').addEventListener('click', () => {
+  const destinationId = document.querySelector('#exit-destination').value;
+  if (!selectedExitId || !destinationId) { document.querySelector('#exit-status').textContent = 'Choose a destination exit first.'; return; }
+  void mutateExit(`/api/project/exits/${encodeURIComponent(selectedExitId)}/link`, 'POST', { destinationId }, 'Exits linked.');
 });
-async function connectionHistoryCommand(direction) {
-  const response = await fetch(`/api/project/connections/${direction}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: projectRevision }) });
-  const result = await response.json(), status = document.querySelector('#connection-status');
-  if (!response.ok && response.status !== 202) { status.textContent = result.error; return; }
-  projectRevision = result.revision; setSaveStatus(result.status ?? { state: 'saved' }); status.textContent = `Connection ${direction} complete.`;
-  if (result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
-}
-document.querySelector('#connection-undo').addEventListener('click', () => void connectionHistoryCommand('undo'));
-document.querySelector('#connection-redo').addEventListener('click', () => void connectionHistoryCommand('redo'));
+document.querySelector('#exit-unlink').addEventListener('click', () => { if (selectedExitId) void mutateExit(`/api/project/exits/${encodeURIComponent(selectedExitId)}/unlink`, 'POST', {}, 'Exits unlinked.'); });
+document.querySelector('#exit-delete').addEventListener('click', () => { if (selectedExitId) void mutateExit(`/api/project/exits/${encodeURIComponent(selectedExitId)}`, 'DELETE', {}, 'Exit deleted.'); });
 
 function readMarkerVisibility(floorId, type) {
   try { const value = JSON.parse(localStorage.getItem(`rr-marker-visibility:${floorId}`) ?? '{}'); return value[type] !== false; } catch { return true; }
@@ -844,11 +940,12 @@ async function markerTypeHistoryCommand(direction) {
 document.querySelector('#marker-type-undo').addEventListener('click', () => void markerTypeHistoryCommand('undo'));
 document.querySelector('#marker-type-redo').addEventListener('click', () => void markerTypeHistoryCommand('redo'));
 function centerMarker(marker) {
+  playerUI?.stop();
   if (!image.naturalWidth) { pendingCenterMarker = marker; return; }
   const pixels = floorManifest.renderer?.pixelSize ?? 16;
   const maxX = Math.max(0, image.naturalWidth * zoom / 2 - 36), maxY = Math.max(0, image.naturalHeight * zoom / 2 - 36);
   offsetX = Math.max(-maxX, Math.min(maxX, -(marker.x * pixels - image.naturalWidth / 2) * zoom));
-  offsetY = Math.max(-maxY, Math.min(maxY, -(marker.z * pixels - image.naturalHeight / 2) * zoom));
+  offsetY = Math.max(-maxY, Math.min(maxY, -(markerScreenZ(marker) * pixels - image.naturalHeight / 2) * zoom));
   drawTransform();
 }
 async function refreshPublicManifest() {
@@ -884,7 +981,7 @@ function showMarkerPopup(marker, note = '') {
   const pixels = floorManifest.renderer?.pixelSize ?? 16, popup = document.querySelector('#marker-popup');
   document.querySelector('#popup-name').textContent = marker.name;
   document.querySelector('#popup-description').textContent = [marker.description, note].filter(Boolean).join('\n');
-  popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${marker.z * pixels + 14}px`; popup.hidden = false;
+  popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${markerScreenZ(marker) * pixels + 14}px`; popup.hidden = false;
 }
 function populateMarkerForm(marker = null) {
   document.querySelector('#marker-id').value = marker?.id ?? '';
@@ -894,8 +991,8 @@ function populateMarkerForm(marker = null) {
   document.querySelector('#marker-icon').value = marker?.icon ?? '';
   const section = floorManifest?.sections.find(item => item.id === marker?.sectionId) ?? floorManifest?.sections[0];
   if (section) document.querySelector('#marker-section').value = section.id;
-  document.querySelector('#marker-x').value = marker?.localX ?? 0.5;
-  document.querySelector('#marker-z').value = marker?.localZ ?? 0.5;
+  document.querySelector('#marker-x').value = (marker?.localX ?? 0.5) - 0.5;
+  document.querySelector('#marker-z').value = (marker?.localZ ?? 0.5) - 0.5;
   document.querySelector('#marker-delete').hidden = !marker;
   document.querySelector('#preserve-marker-position').checked = true;
   initialMarkerSection = marker?.sectionId ?? null;
@@ -947,12 +1044,12 @@ document.querySelector('#marker-section').addEventListener('change', event => {
   const oldSection = floorManifest.sections.find(section => section.id === initialMarkerSection);
   const nextSection = floorManifest.sections.find(section => section.id === event.target.value);
   if (!oldSection || !nextSection) return;
-  document.querySelector('#marker-x').value = (initialMarkerDisplay.x - nextSection.placementX).toFixed(2);
-  document.querySelector('#marker-z').value = (initialMarkerDisplay.z - nextSection.placementZ).toFixed(2);
+  document.querySelector('#marker-x').value = (initialMarkerDisplay.x - nextSection.placementX - 0.5).toFixed(2);
+  document.querySelector('#marker-z').value = (initialMarkerDisplay.z - nextSection.placementZ - 0.5).toFixed(2);
 });
 async function persistMarker(id = document.querySelector('#marker-id').value, preserveDisplayedPosition = false) {
   const status = document.querySelector('#marker-status');
-  const marker = { type: document.querySelector('#marker-type').value, name: document.querySelector('#marker-name').value, description: document.querySelector('#marker-description').value, icon: document.querySelector('#marker-icon').value || null, sectionId: document.querySelector('#marker-section').value, x: Number(document.querySelector('#marker-x').value), z: Number(document.querySelector('#marker-z').value) };
+  const marker = { type: document.querySelector('#marker-type').value, name: document.querySelector('#marker-name').value, description: document.querySelector('#marker-description').value, icon: document.querySelector('#marker-icon').value || null, sectionId: document.querySelector('#marker-section').value, x: Number(document.querySelector('#marker-x').value) + 0.5, z: Number(document.querySelector('#marker-z').value) + 0.5 };
   status.textContent = 'Saving marker…';
   try {
     const keepDisplayedPosition = Boolean(id && marker.sectionId !== initialMarkerSection && document.querySelector('#preserve-marker-position').checked);
@@ -965,7 +1062,7 @@ async function persistMarker(id = document.querySelector('#marker-id').value, pr
     projectRevision = result.marker?.revision ?? result.revision ?? projectRevision;
     if (!result.saved) { status.textContent = `Marker kept as a recoverable edit; ${result.warning}. Use Save to retry.`; setSaveStatus({ state: 'failed', error: result.warning }); return false; }
     status.textContent = 'Marker saved.'; await loadFloor(document.querySelector('#floor').value); await refreshSaveStatus();
-    if (!id && result.marker) populateMarkerForm(result.marker);
+    if (!id && result.marker) populateMarkerForm(floorManifest.markers.find(marker => marker.id === result.marker.id) ?? null);
     return true;
   } catch (error) { status.textContent = error.message; return false; }
 }
@@ -982,21 +1079,19 @@ document.querySelector('#cell-add-marker').addEventListener('click', () => {
   openEditorSection('Markers');
   populateMarkerForm();
   document.querySelector('#marker-section').value = inspectedSection.id;
-  document.querySelector('#marker-x').value = inspectedCoords.x + 0.5;
-  document.querySelector('#marker-z').value = inspectedCoords.z + 0.5;
+  document.querySelector('#marker-x').value = inspectedCoords.x;
+  document.querySelector('#marker-z').value = inspectedCoords.z;
   document.querySelector('#cell-popup').hidden = true;
 });
 document.querySelector('#cell-add-connection').addEventListener('click', () => {
   if (!inspectedSection || !inspectedCoords) return;
-  openEditorSection('Section connections');
-  document.querySelector('#connection-new').click();
-  document.querySelector('#connection-a').value = inspectedSection.id;
-  document.querySelector('#connection-x-a').value = inspectedCoords.x + 0.5;
-  document.querySelector('#connection-z-a').value = inspectedCoords.z + 0.5;
-  const other = floorManifest.sections.find(section => section.id !== inspectedSection.id);
-  if (other) document.querySelector('#connection-b').value = other.id;
+  selectedExitId = '';
+  pendingExit = { sectionId: inspectedSection.id, x: inspectedCoords.x + 0.5, z: inspectedCoords.z + 0.5, name: 'Exit' };
+  openEditorSection('Exits'); renderExitEditor();
+  document.querySelector('#exit-name').focus(); document.querySelector('#exit-name').select();
   document.querySelector('#cell-popup').hidden = true;
 });
+
 document.querySelector('#marker-delete').addEventListener('click', async () => {
   const id = document.querySelector('#marker-id').value;
   const marker = floorManifest.markers.find(item => item.id === id), linked = Boolean(marker?.stairDestinationId);
@@ -1038,6 +1133,7 @@ async function refreshSession() {
       ? `Minecraft ${project.assets.minecraftVersion} assets are configured.`
       : 'No matching assets are configured yet.';
     const floors = await fetch('/api/project/floors').then(result => result.json());
+    importSections = floors.sections ?? [];
     projectRevision = floors.revision;
     const lifecycleFloor = document.querySelector('#lifecycle-floor-target');
     lifecycleFloor.replaceChildren(...floors.floors.map(floor => new Option(floor.name, floor.id)));
@@ -1046,6 +1142,7 @@ async function refreshSession() {
     selector.replaceChildren(new Option('Create a new floor', ''));
     for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
     document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
+    updateImportPosition();
     await refreshSaveStatus();
     await refreshRecoverySnapshots();
     if (visibleHeight < 256 && floorManifest) updateSlicePreview();
@@ -1166,7 +1263,18 @@ document.querySelector('#backup-restore').addEventListener('click', async () => 
   } catch (error) { status.textContent = `Restore failed: ${error.message}. The server preserves the previous project on validation or restore errors.`; }
   finally { button.disabled = false; }
 });
-document.querySelector('#import-floor').addEventListener('change', event => { document.querySelector('#import-floor-name').disabled = Boolean(event.target.value); });
+function updateImportPosition() {
+  const floorId = document.querySelector('#import-floor').value;
+  const middle = importSections.find(section => section.floorId === floorId);
+  const select = document.querySelector('#import-position'), previous = select.value;
+  select.replaceChildren(...(middle
+    ? sectionDirections.map(direction => new Option(direction.replaceAll('-', ' '), direction))
+    : [new Option('Middle (first section)', 'middle')]));
+  select.disabled = !middle;
+  select.value = middle ? (sectionDirections.includes(previous) ? previous : 'right') : 'middle';
+  document.querySelector('#import-position-help').textContent = middle ? 'Position beside ' + middle.name + ' (middle).' : 'The first section becomes the middle of this floor.';
+}
+document.querySelector('#import-floor').addEventListener('change', event => { document.querySelector('#import-floor-name').disabled = Boolean(event.target.value); updateImportPosition(); });
 document.querySelector('#import-schematic').addEventListener('click', async () => {
   const file = document.querySelector('#schematic-file').files[0];
   const status = document.querySelector('#import-status');
@@ -1176,15 +1284,20 @@ document.querySelector('#import-schematic').addEventListener('click', async () =
   status.textContent = 'Validating and importing schematic…';
   const headers = { 'content-type': 'application/octet-stream', 'x-project-revision': String(projectRevision), 'x-source-name': file.name, 'x-section-name': sectionName, 'x-floor-name': document.querySelector('#import-floor-name').value.trim() || 'Floor 0' };
   if (floorId) headers['x-floor-id'] = floorId;
+  headers['x-section-position'] = document.querySelector('#import-position').value;
   const response = await fetch('/api/project/import', { method: 'POST', headers, body: file });
   const result = await response.json();
-  status.textContent = response.ok ? `Imported ${result.blockCount} blocks into ${sectionName}. The source upload was removed.` : result.error;
+  status.textContent = response.ok ? (result.saved ? `Imported ${result.blockCount} blocks into ${sectionName}. The source upload was removed.` : `Section imported; ${result.warning}. Use Save to retry rendering.`) : result.error;
   if (result.status) setSaveStatus(result.status);
-  if (response.ok) { await refreshSession(); await loadFloor(document.querySelector('#floor').value); }
+  if (response.ok) {
+    await refreshPublicManifest();
+    await refreshSession();
+    if (result.saved) { document.querySelector('#floor').value = result.floorId; await loadFloor(result.floorId); }
+  }
 });
 document.querySelector('#save-project').addEventListener('click', saveProject);
 renderSidebar();
-new ResizeObserver(() => fitFloor()).observe(viewport);
+new ResizeObserver(() => { if (!playerUI?.following) fitFloor(); }).observe(viewport);
 
 try {
   const response = await fetch('/api/map/manifest', { cache: 'no-store' });
@@ -1196,3 +1309,28 @@ try {
 } catch (error) {
   message.textContent = error.message;
 }
+
+playerUI = mountPlayerTracking({
+  state: () => ({ floor: floorManifest, zoom, editing: editorOpen && editorAuthenticated }),
+  selectedBlock: () => inspectedBlock && inspectedCoords ? { ...inspectedCoords } : null,
+  blockError: text => { document.querySelector('#block-status').textContent = text; },
+  openEditor: () => { sidebarOpen = true; renderSidebar(); },
+  revision: value => { projectRevision = value; },
+  initialZoom: () => setZoom(Math.max(zoom, Math.min(3, viewport.clientWidth / (48 * (floorManifest?.renderer?.pixelSize ?? 16))))),
+  center: point => {
+    const pixels = floorManifest.renderer?.pixelSize ?? 16;
+    offsetX = -(point.x * pixels - image.naturalWidth / 2) * zoom;
+    offsetY = -((floorManifest.bounds.depth - point.z) * pixels - image.naturalHeight / 2) * zoom;
+    drawTransform();
+  },
+  navigate: async id => {
+    document.querySelector('#floor').value = id;
+    await loadFloor(id, { following: true });
+    await image.decode();
+  },
+  refreshMap: async () => {
+    await refreshPublicManifest();
+    await loadFloor(document.querySelector('#floor').value, { following: true });
+    await image.decode();
+  }
+});

@@ -44,13 +44,14 @@ test('section cutaways/exclusions are validated and persisted without changing s
   const settings = { cutaways: [{ x: 0, y: 0, z: 0, width: 1, height: 1, depth: 1 }], excludedBlocks: ['minecraft:torch'], pixelSize: 20, heightShadePerBlock: 0.025 };
   assert.equal(saveSectionRenderSettings(db, 's1', settings, 1).revision, 2);
   const snapshot = snapshotProject(db);
-  assert.deepEqual(snapshot.floors[0].sections[0].renderSettings, settings);
+  const persisted = { heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1, surfaceShadeMultiplier: 0, ...settings };
+  assert.deepEqual(snapshot.floors[0].sections[0].renderSettings, persisted);
   assert.deepEqual(readSectionBlocks(db, 's1'), before);
   assert.throws(() => saveSectionRenderSettings(db, 's1', { ...settings, pixelSize: 100 }, 2), /4 to 32/);
   assert.throws(() => saveSectionRenderSettings(db, 's1', { ...settings, cutaways: [{ x: 0, y: 0, z: 0, width: 0, height: 2, depth: 2 }] }, 2), /positive bounded/);
   assert.equal(projectRevision(db), 2);
   db.close(); db = openProject(file);
-  assert.deepEqual(snapshotProject(db).floors[0].sections[0].renderSettings, settings);
+  assert.deepEqual(snapshotProject(db).floors[0].sections[0].renderSettings, persisted);
 });
 
 test('render generation applies cutaway and exclusion settings to an isolated copy and honors scale controls', async t => {
@@ -85,7 +86,19 @@ test('rasterizer layers resource pack textures and rejects unsafe dimensions and
   assert.deepEqual(await pixel(path.join(dir, 'vanilla.png')), [240,20,20]);
   assert.deepEqual(await pixel(path.join(dir, 'packed.png')), [20,240,20]);
   await assert.rejects(renderOrthographic(schematic, { assets: vanilla, output: path.join(dir, 'invalid.png'), pixelSize: 33 }), /4 to 32/);
-  await assert.rejects(renderOrthographic({ dimensions: { x: 1000, y: 1, z: 1000 }, blocks: [] }, { assets: vanilla, output: path.join(dir, 'large.png'), pixelSize: 32 }), /8,000,000 pixel safety limit/);
+  await assert.rejects(renderOrthographic({ dimensions: { x: 1000, y: 1, z: 1000 }, blocks: [] }, { assets: vanilla, output: path.join(dir, 'large.png'), pixelSize: 32 }), /16,000,000 pixel safety limit/);
+});
+
+test('renderer accepts the 2784 by 3440 map while honoring a lower caller limit', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-large-render-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const schematic = { dimensions: { x: 174, y: 1, z: 215 }, blocks: [] };
+  const options = { assets: dir, output: path.join(dir, 'large.png'), pixelSize: 16 };
+  await assert.rejects(renderOrthographic(schematic, { ...options, maxPixels: 8_000_000 }), /8,000,000 pixel safety limit/);
+  await renderOrthographic(schematic, options);
+  const metadata = await sharp(options.output).metadata();
+  assert.equal(metadata.width, 2784);
+  assert.equal(metadata.height, 3440);
 });
 
 test('rasterizer reports partial rendered surfaces and explicit empty cells in deterministic Z rows', async t => {
@@ -104,6 +117,30 @@ test('rasterizer reports partial rendered surfaces and explicit empty cells in d
   assert.deepEqual(result.heightGrid, { width: 3, depth: 1, values: [[0.5, 6, null]] });
 });
 
+test('structural shading ignores decorations and legacy bounds while retaining section separation', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-structural-shading-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const folder of ['blockstates', 'models/block', 'textures/block']) await mkdir(path.join(dir, folder), { recursive: true });
+  await writeFile(path.join(dir, 'models/block/full.json'), JSON.stringify({ textures: { all: 'minecraft:block/stone' }, elements: [{ from: [0,0,0], to: [16,16,16], faces: { up: { texture: '#all' } } }] }));
+  for (const name of ['stone', 'poppy']) await writeFile(path.join(dir, 'blockstates', `${name}.json`), JSON.stringify({ variants: { '': { model: 'minecraft:block/full' } } }));
+  await sharp({ create: { width: 16, height: 16, channels: 4, background: { r: 120, g: 120, b: 120, alpha: 1 } } }).png().toFile(path.join(dir, 'textures/block/stone.png'));
+  const base = Array.from({ length: 6 }, (_, x) => ({ x, y: x < 3 ? 0 : 3, z: 0, id: 'minecraft:stone', sectionId: 'one', properties: {} }));
+  const render = async (blocks, options = {}) => {
+    const output = path.join(dir, 'map.png');
+    const metadata = await renderOrthographic({ dimensions: { x: 6, y: 20, z: 1 }, blocks }, { assets: dir, pixelSize: 8, output, ...options });
+    return { pixels: await sharp(output).raw().toBuffer(), metadata };
+  };
+  const original = await render(base);
+  const decorated = await render([...base, { x: 1, y: 12, z: 0, id: 'minecraft:poppy', properties: {} }]);
+  assert.deepEqual(decorated.pixels, original.pixels, 'a decoration drawn with the same texture must not change structural shading');
+  assert.equal(decorated.metadata.heightGrid.values[0][1], 13, 'visible height metadata still includes decorations');
+  assert.deepEqual((await render(base, { heightShadeMinY: -200, heightShadeMaxY: 200 })).pixels, original.pixels);
+  const separated = await render(base.map(block => ({ ...block, sectionId: block.x < 3 ? 'one' : 'two' })));
+  const unshaded = await render(base, { heightShadeMultiplier: 0 });
+  assert.deepEqual(separated.pixels, unshaded.pixels);
+  assert.notDeepEqual(original.pixels, unshaded.pixels);
+});
+
 test('render settings API requires editor auth, saves, undoes/redoes, and survives server restart', async t => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'rr-render-settings-api-'));
   const db = createProject(openProject(path.join(dataDir, 'project.sqlite')));
@@ -115,7 +152,7 @@ test('render settings API requires editor auth, saves, undoes/redoes, and surviv
   assert.equal((await fetch(`${app.origin}/api/project/sections/s1/render-settings`, { method: 'PUT', body: '{}' })).status, 401);
   const login = await fetch(`${app.origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin: app.origin }, body: JSON.stringify({ password: 'secret' }) });
   const headers = { cookie: login.headers.get('set-cookie').split(';')[0], origin: app.origin, 'content-type': 'application/json' };
-  const settings = { cutaways: [{ x: 0, y: 0, z: 0, width: 1, height: 2, depth: 1 }], excludedBlocks: ['minecraft:stone'], pixelSize: 18, heightShadePerBlock: 0.02 };
+  const settings = { cutaways: [{ x: 0, y: 0, z: 0, width: 1, height: 2, depth: 1 }], excludedBlocks: ['minecraft:stone'], pixelSize: 18, heightShadePerBlock: 0.02, surfaceShadeMultiplier: 1.4 };
   const save = await fetch(`${app.origin}/api/project/sections/s1/render-settings`, { method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 1, settings }) });
   assert.equal(save.status, 200, (await save.clone().json()).error);
   assert.equal((await save.json()).saved, true);
@@ -123,9 +160,10 @@ test('render settings API requires editor auth, saves, undoes/redoes, and surviv
   assert.equal((await fetch(`${app.origin}/api/project/render-settings/redo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 3 }) })).status, 200);
   await new Promise(resolve => app.server.close(resolve)); app = await listen();
   const loaded = openProject(path.join(dataDir, 'project.sqlite'));
-  try { assert.deepEqual(snapshotProject(loaded).floors[0].sections[0].renderSettings, settings); } finally { loaded.close(); }
+  const persisted = { heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1, surfaceShadeMultiplier: 0, ...settings };
+  try { assert.deepEqual(snapshotProject(loaded).floors[0].sections[0].renderSettings, persisted); } finally { loaded.close(); }
   const visitor = await fetch(`${app.origin}/api/map/manifest`); assert.equal(visitor.status, 200);
-  assert.deepEqual((await visitor.json()).floors[0].sections[0].renderSettings, settings);
+  assert.deepEqual((await visitor.json()).floors[0].sections[0].renderSettings, persisted);
 });
 
 test('resource pack upload requires authentication, advances rendered output and preserves metadata across restart', async t => {

@@ -17,7 +17,7 @@ function project() {
   return db;
 }
 
-test('section connections require distinct sections on one floor and valid local anchors', () => {
+test('section connections require distinct sections across floors and valid local anchors', () => {
   const db = project();
   try {
     const input = { sectionAId: 's1', xA: 2.5, zA: 3.5, sectionBId: 's2', xB: 4, zB: 5, label: 'Secret passage' };
@@ -26,12 +26,20 @@ test('section connections require distinct sections on one floor and valid local
     assert.equal(first.revision, 1);
     assert.equal(second.revision, 2);
     assert.equal(snapshotProject(db).floors[0].connections.length, 2);
-    assert.throws(() => db.prepare("UPDATE sections SET floor_id='f2' WHERE id='s1'").run(), /remove section connections/i);
     assert.throws(() => db.prepare("DELETE FROM sections WHERE id='s1'").run(), /FOREIGN KEY constraint failed/i);
     assert.throws(() => saveSectionConnection(db, { ...input, sectionBId: 's1' }, 2), /different sections/i);
-    assert.throws(() => saveSectionConnection(db, { ...input, sectionBId: 'other-floor' }, 2), /same floor/i);
     assert.throws(() => saveSectionConnection(db, { ...input, xA: 41 }, 2), /anchor/i);
     assert.throws(() => saveSectionConnection(db, { ...input, label: 'x'.repeat(121) }, 2), /label/i);
+    saveSectionConnection(db, { ...input, sectionBId: 'other-floor' }, 2);
+    const snapshot = snapshotProject(db);
+    assert.deepEqual(snapshot.unresolvedRecords.connections, []);
+    const firstFloor = snapshot.floors[0].connections.find(link => link.sectionBId === 'other-floor');
+    const otherFloor = snapshot.floors[1].connections[0];
+    assert.equal(firstFloor.floorBId, 'f2');
+    assert.deepEqual(firstFloor.displayA, { x: 2.5, z: 3.5 });
+    assert.equal(firstFloor.displayB, null);
+    assert.equal(otherFloor.displayA, null);
+    assert.deepEqual(otherFloor.displayB, { x: 4, z: 5 });
   } finally { db.close(); }
 });
 
@@ -57,6 +65,8 @@ test('connection API is authenticated, metadata-only, undoable, and durable in v
   const db = openProject(path.join(dataDir, 'project.sqlite'));
   db.prepare('INSERT INTO floors(id,name,sort_order) VALUES(?,?,?)').run('f1', 'Floor 1', 0);
   for (const [id, x] of [['s1', 0], ['s2', 40]]) db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run(id, 'f1', id, JSON.stringify({ x: 40, y: 10, z: 30 }), x, 0, '{}');
+  db.prepare('INSERT INTO floors VALUES(?,?,?)').run('f2', 'Floor 2', 1);
+  db.prepare("INSERT INTO sections(id,floor_id,name,bounds_json,provenance_json) VALUES('s3','f2','Upper room',?, '{}')").run(JSON.stringify({ x: 40, y: 10, z: 30 }));
   db.prepare("UPDATE project_meta SET value='1' WHERE key='revision'").run(); db.close();
   let renders = 0;
   const renderer = { async render({ output }) { renders++; await writeFile(output, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1])); return { width: 640, height: 480, bounds: { width: 80, depth: 30 }, renderer: { pixelSize: 16 } }; } };
@@ -72,12 +82,12 @@ test('connection API is authenticated, metadata-only, undoable, and durable in v
   assert.equal(first.status, 201, (await first.clone().json()).error);
   const firstData = await first.json();
   assert.equal(firstData.saved, true);
-  const second = await fetch(`${app.origin}/api/project/connections`, { method: 'POST', headers, body: body(2, { sectionAId: 's1', xA: 6, zA: 7, sectionBId: 's2', xB: 8, zB: 9, label: 'Alternate' }) });
+  const second = await fetch(`${app.origin}/api/project/connections`, { method: 'POST', headers, body: body(2, { sectionAId: 's1', xA: 6, zA: 7, sectionBId: 's3', xB: 8, zB: 9, label: 'Alternate' }) });
   assert.equal(second.status, 201);
   assert.equal((await fetch(`${app.origin}/api/project/connections`, { method: 'POST', headers, body: body(3, { sectionAId: 's1', xA: 1, zA: 1, sectionBId: 's1', xB: 2, zB: 2 }) })).status, 409);
   const edit = await fetch(`${app.origin}/api/project/connections/${firstData.id}`, { method: 'PUT', headers, body: body(3, { sectionAId: 's1', xA: 3, zA: 4, sectionBId: 's2', xB: 5, zB: 6, label: 'Edited' }) });
   assert.equal(edit.status, 200, (await edit.clone().json()).error);
-  assert.equal(renders, 1, 'connection metadata edits must not render terrain');
+  assert.equal(renders, 2, 'connection metadata edits must not render terrain');
   let manifest = await fetch(`${app.origin}/api/map/manifest?floor=f1`).then(response => response.json());
   assert.equal(manifest.connections.length, 2);
   assert.equal(manifest.connections.find(item => item.label === 'Edited').displayB.x, 45);
@@ -87,9 +97,13 @@ test('connection API is authenticated, metadata-only, undoable, and durable in v
   assert.equal((await fetch(`${app.origin}/api/project/connections/undo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 7 }) })).status, 200);
   manifest = await fetch(`${app.origin}/api/map/manifest?floor=f1`).then(response => response.json());
   assert.equal(manifest.connections.length, 2);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   await new Promise(resolve => app.server.close(resolve)); app = await listen();
   manifest = await fetch(`${app.origin}/api/map/manifest?floor=f1`).then(response => response.json());
   assert.equal(manifest.connections.length, 2);
   assert.equal(manifest.projectRevision, 8);
+  const upper = await fetch(`${app.origin}/api/map/manifest?floor=f2`).then(response => response.json());
+  assert.equal(upper.connections.length, 1);
+  assert.equal(upper.connections[0].floorAId, 'f1');
+  assert.deepEqual(upper.connections[0].displayB, { x: 8, z: 9 });
 });

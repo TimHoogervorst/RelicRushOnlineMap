@@ -2,6 +2,37 @@
 
 This records accepted interview answers. The [implementation spec](implementation-spec.md) now covers one Docker application for viewing and all authoring. Saving updates the visitor-facing map on refresh, with no separate preview or publish step. Whole-section movement and dotted section connections are agreed.
 
+## Map readability exploration — 2026-10-18
+
+- Prioritize recognizing passages, separating walls, and higher/lower terrain at full-map zoom while retaining recognizable Minecraft textures. These cues should help players judge routes and potential drops.
+- Prefer equally strong shading for identical local geometry at different elevations, but readability takes precedence over strict elevation invariance.
+- Passage ground can rise and fall; walls rise beside passages and need not form an abrupt vertical step. A sharp-height-change treatment is an acceptable first comparison, not a complete definition of a wall or a guarantee of impassability.
+- Make the higher and lower sides of ledges visually distinguishable to help players interpret potential drops, without claiming a jump is safe. The specific visual treatment remains to be compared.
+- Keep ordinary small steps and gradual slopes softly shaded; emphasize larger, steeper changes more strongly. Choose thresholds through visual comparison so stairs still read as continuous routes.
+- Rendering method, handling of gradual wall sides, and visual distinction between steps and larger drops remain open. These answers do not select an algorithm or authorize replacing the renderer yet.
+
+## Live player tracking exploration — 2026-10-18
+
+- Track actual Minecraft players from `https://kaart.wereldbouw.net/tiles/players.json`. Website visitors are not tracked players.
+- Display player head icons obtained using official Minecraft profile/skin services and cached locally. Keep the displayed heads upright rather than rotating with player facing.
+- Start with one calibration waypoint per section and evaluate tracking accuracy before extending calibration. Add it from the selected block popup using + Waypoint, linking local block coordinates to actual Minecraft X/Y/Z.
+- Keep section-local calibration independent of the arranged display layout. Sections without a waypoint remain viewable and editable, but do not participate in live player positioning; show Needs waypoint in the editor.
+- Show a small right sidebar of players inside calibrated mapped sections across all floors, with their heads, names, floors, and sections. Exclude unrelated players elsewhere on the server.
+- Assign each tracked player to at most one section at a time using a world identifier and a three-dimensional tracking region. Initialize the region from section geometry and calibration, include air above walkable blocks, and allow the editor to adjust its limits. Use Y to distinguish vertically stacked sections. Waypoint coordinates identify the selected block, not the player's standing position.
+- Select floors by actual world Y before applying previous-section history. Among regions containing the player's world X/Y/Z, prefer the floor with the highest matching Min Y. This switches to an upper floor at its lower boundary even when the lower floor's box extends upward into it, and switches back when descending. Floor names and display order do not determine elevation. Within the chosen floor, retain the previous section only while it still matches; otherwise treat multiple matches as ambiguous. Equal-height floor ties retain the prior matching section or remain ambiguous. Flag overlapping tracking regions in the editor. Positions outside all calibrated regions remain unmapped.
+- Clicking a player starts following, centers the player, and applies an appropriate initial zoom. Visitors can subsequently zoom in or out while following. Follow across section and floor changes; manual panning or floor selection stops following. Show the followed player's name and a Stop control.
+- The owner confirmed all existing sections were flipped vertically (top / bottom). Use that known orientation for one-waypoint calibration; reverse world Z relative to local Z around block centers. Record subsequent rotations and flips with each section, moving the waypoint with its block and preserving world tracking limits, including undo/redo. New imports start unflipped and record their transforms before or after calibration. This supersedes invalidating calibration on transforms; upright head icons remain independent of section orientation.
+- When a followed player leaves mapped space or disappears from a successful feed response, stop following, leave the camera in place, and briefly explain. On feed failure, freeze positions with a stale indicator; after 15 seconds without a successful update, hide positions and stop following.
+- Poll the feed once every two seconds through a shared server-side request cycle. Smooth movement within a section; switch directly between floors or separated sections rather than animating through unrelated map space.
+- Load head icons independently of position tracking, using a generic head while unavailable. Cache by UUID, refresh skins at most daily, and retain cached heads if the skin service fails.
+- Waypoint controls are editor-only. Each section has at most one waypoint, supporting replacement, coordinate correction, and deletion. Persist calibration with the project and include it in backups. Moving a section in the displayed layout preserves calibration; deleting its waypoint disables tracking for that section.
+- When creating calibration, suggest the world reported by the feed. Initialize the tracking region from the section's geometry, extending three blocks above its highest block, and allow editing of the world and all X/Y/Z limits. Keep saved limits stable during subsequent geometry edits so ordinary block changes do not silently reassign players.
+- Provide an editor-only tracking diagnostic showing a player's world coordinates, calculated section-local coordinates, and matched section. Validate calibration against the waypoint and two distant known blocks, then test a section transition and a floor transition. Use these checks to distinguish calibration errors, feed delay, and incorrect tracking boundaries before extending calibration beyond one waypoint.
+- The live feed was fetched successfully during this interview. Its top-level object contains max and players; the observed player entry contains world, name, uuid, x, y, z, yaw, health, and armor.
+- The user accepted all interview recommendations, including the final waypoint lifecycle, tracking-region defaults, and accuracy checks. The design interview is complete. Implementation now includes calibration persistence, shared feed polling, official skin head caching, the player panel, following, and editor diagnostics. Live in-game calibration validation remains pending.
+
+## Previously agreed decisions
+
 - Visitors see the full published dungeon map without accounts or discovery tracking. A legend lets them filter marker types.
 - Each floor is one continuous map containing all its sections. Small terrain height changes remain within the floor.
 - Only the owner edits project geometry, layout, markers, and marker types, through a small password login. Use one server-configured password with a seeded local-testing default and an environment override. Enforce authorization on the server and limit login attempts. Internet hosting uses HTTPS.

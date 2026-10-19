@@ -140,6 +140,23 @@ test('authenticated owner imports a Litematic once and source upload is removed'
   assert.equal((await readdir(dataDir)).some(name => name.startsWith('schematic-upload-')), false);
 });
 
+test('import API places a new section left of the existing middle', async t => {
+  const { origin } = await fixture(t);
+  const login = await fetch(`${origin}/api/auth/login`, { method:'POST', headers:{'content-type':'application/json',origin}, body:JSON.stringify({password:'secret'}) });
+  const cookie=login.headers.get('set-cookie').split(';')[0];
+  const bytes=await readFile(new URL('../schematics/Start 0F.litematic',import.meta.url));
+  const headers={cookie,origin,'content-type':'application/octet-stream','x-project-revision':'0','x-section-position':'middle'};
+  const first=await fetch(`${origin}/api/project/import`,{method:'POST',headers,body:bytes}).then(r=>r.json());
+  const response=await fetch(`${origin}/api/project/import`,{method:'POST',headers:{...headers,'x-project-revision':'1','x-floor-id':first.floorId,'x-section-position':'left'},body:bytes});
+  const second=await response.json();
+  assert.equal(response.status,201,second.error);
+  const manifest=await fetch(`${origin}/api/map/manifest`).then(r=>r.json());
+  const sections=manifest.floors[0].sections;
+  assert.equal(sections[0].id,first.sectionId);
+  assert.equal(sections[1].id,second.sectionId);
+  assert.ok(sections[1].placementX+sections[1].bounds.x<sections[0].placementX);
+});
+
 test('owner can upload version-checked assets and failed setup preserves configured metadata', async t => {
   const { origin } = await fixture(t);
   const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });

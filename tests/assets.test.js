@@ -27,7 +27,9 @@ function zip(entries) {
 const required = [
   ['blockstates/stone.json', '{}'],
   ['models/block/stone.json', '{}'],
-  ['textures/block/stone.png', 'png']
+  ['textures/block/stone.png', 'png'],
+  ['textures/item/diamond.png', 'png'],
+  ['items/stone.json', JSON.stringify({ model: { type: 'minecraft:model', model: 'minecraft:block/stone' } })]
 ];
 const source = version => [['version.json', JSON.stringify({ id: version, world_version: 5023 })], ...required.map(([name, data]) => [`assets/minecraft/${name}`, data])];
 
@@ -38,6 +40,8 @@ test('asset extraction rejects cumulative expansion over its configured bound an
   await writeFile(jar, zip(source('26.3')));
   const metadata = await extractMatchingAssets(jar, output);
   assert.equal(metadata.minecraftVersion, '26.3');
+  assert.equal(metadata.itemDefinitions, 1);
+  assert.equal(JSON.parse(await readFile(path.join(output, 'items/stone.json'), 'utf8')).model.model, 'minecraft:block/stone');
   await writeFile(jar, zip(source('26.3').map(([name, data]) => [name, name === 'version.json' ? data : `${data}123456`])));
   await assert.rejects(extractMatchingAssets(jar, output, '26.3', { maxExpandedBytes: 8 }), /Expanded Minecraft assets exceed/);
   assert.equal(JSON.parse(await readFile(path.join(output, 'asset-source.json'), 'utf8')).sha256, metadata.sha256);

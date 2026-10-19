@@ -1,8 +1,9 @@
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
+import { isStructuralBlock, shadeTerrain } from './terrain-shading.js';
 
-const MAX_RENDER_PIXELS = 8_000_000;
+const MAX_RENDER_PIXELS = 16_000_000;
 
 function resourcePath(id) {
   const split = id.indexOf(':');
@@ -37,7 +38,7 @@ function matchingModels(blockstate, properties) {
   return output;
 }
 
-export async function renderOrthographic(schematic, { assets, output, pixelSize = 16, heightShadePerBlock = 0.018, heightShadeMinY = null, heightShadeMaxY = null, heightShadeMultiplier = 1, maxPixels = MAX_RENDER_PIXELS, assetOverrides = [] } = {}) {
+export async function renderOrthographic(schematic, { assets, output, pixelSize = 16, heightShadePerBlock = 0.018, heightShadeMinY = null, heightShadeMaxY = null, heightShadeMultiplier = 1, surfaceShadeMultiplier = 0, maxPixels = MAX_RENDER_PIXELS, assetOverrides = [] } = {}) {
   if (!assets) throw new Error('Minecraft assets are not configured. Set MINECRAFT_ASSETS to the extracted assets/minecraft directory from the matching Minecraft 26.3 client JAR.');
   if (!Number.isInteger(pixelSize) || pixelSize < 4 || pixelSize > 32) throw new Error('Pixel scale must be an integer from 4 to 32 pixels per block.');
   if (typeof heightShadePerBlock !== 'number' || !Number.isFinite(heightShadePerBlock) || heightShadePerBlock < 0 || heightShadePerBlock > 0.05) throw new Error('Height shading must be between 0 and 0.05 per block.');
@@ -45,13 +46,17 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
   if (heightShadeMaxY !== null && (!Number.isSafeInteger(heightShadeMaxY) || Math.abs(heightShadeMaxY) > 1_000_000)) throw new Error('Maximum shading Y must be a whole block coordinate.');
   if (heightShadeMinY !== null && heightShadeMaxY !== null && heightShadeMinY >= heightShadeMaxY) throw new Error('Maximum shading Y must be higher than minimum shading Y.');
   if (typeof heightShadeMultiplier !== 'number' || !Number.isFinite(heightShadeMultiplier) || heightShadeMultiplier < 0 || heightShadeMultiplier > 10) throw new Error('Height shading multiplier must be from 0 to 10.');
+  if (typeof surfaceShadeMultiplier !== 'number' || !Number.isFinite(surfaceShadeMultiplier) || surfaceShadeMultiplier < 0 || surfaceShadeMultiplier > 10) throw new Error('Surface shading multiplier must be from 0 to 10.');
   const { x: width, z: depth, y: height } = schematic.dimensions;
   const outWidth = width * pixelSize, outHeight = depth * pixelSize;
   const pixelLimit = Math.min(maxPixels, MAX_RENDER_PIXELS);
-  if (outWidth * outHeight > pixelLimit) throw new Error(`Map image ${outWidth}×${outHeight} exceeds the ${pixelLimit.toLocaleString('en-US')} pixel safety limit (about 64 MiB for raster buffers).`);
+  if (outWidth * outHeight > pixelLimit) throw new Error(`Map image ${outWidth}×${outHeight} exceeds the ${pixelLimit.toLocaleString('en-US')} pixel safety limit (about ${Math.ceil(pixelLimit * 20 / 1024 ** 2)} MiB for raster buffers, plus geometry and textures).`);
   const raw = Buffer.alloc(outWidth * outHeight * 4, 0);
   const zBuffer = new Float32Array(outWidth * outHeight).fill(-Infinity);
   const surfaceBuffer = new Float32Array(outWidth * outHeight).fill(-Infinity);
+  const terrainBuffer = new Float32Array(outWidth * outHeight).fill(-Infinity);
+  const terrainOwners = new Uint32Array(outWidth * outHeight);
+  const sectionIds = new Map();
   const modelCache = new Map(), textureCache = new Map(), stateModelCache = new Map();
   const diagnostics = new Set();
   const specialFallbacks = new Set();
@@ -165,6 +170,10 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     prepared.push({ block, ...rendered });
   }
   for (const { block, faces, proxy } of prepared) {
+    const section = block.sectionId ?? '';
+    if (!sectionIds.has(section)) sectionIds.set(section, sectionIds.size + 1);
+    const owner = sectionIds.get(section);
+    const structural = isStructuralBlock(block.id);
     if (!faces.length) {
       const startX = Math.max(0, block.x * pixelSize), endX = Math.min(outWidth, (block.x + 1) * pixelSize);
       const startY = Math.max(0, (depth - block.z - 1) * pixelSize), endY = Math.min(outHeight, (depth - block.z) * pixelSize);
@@ -221,6 +230,10 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
         if (uvRotation === 90) tz = pixels.height - 1 - tz;
         const sample = (tz * pixels.width + tx) * 4, at = py * outWidth + px;
         const alpha = tint ? Math.min(pixels.data[sample + 3], 170) : pixels.data[sample + 3];
+        if (structural && pixels.data[sample + 3] > 248 && y >= terrainBuffer[at]) {
+          terrainBuffer[at] = y;
+          terrainOwners[at] = owner;
+        }
         if (!alpha || y < zBuffer[at]) continue;
         if (y >= surfaceBuffer[at]) surfaceBuffer[at] = y;
         const dest = at * 4;
@@ -240,27 +253,9 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     const x = Math.floor(px / pixelSize), z = depth - 1 - Math.floor(py / pixelSize);
     heightGrid[z][x] = Math.max(heightGrid[z][x] ?? -Infinity, surface);
   }
-  const shadeLowY = heightShadeMinY === null ? lowY : heightShadeMinY + 1;
-  const shadeHighY = heightShadeMaxY === null ? highY : heightShadeMaxY + 1;
-  const verticalSpan = Number.isFinite(shadeLowY) && Number.isFinite(shadeHighY) ? Math.max(0, shadeHighY - shadeLowY) : 0;
-  const totalLayerContrast = Math.min(0.9, Math.min(0.18, verticalSpan * heightShadePerBlock) * heightShadeMultiplier);
-  const sigmoidMin = 1 / (1 + Math.exp(1));
-  const sigmoidMax = 1 / (1 + Math.exp(-1));
-  const layerShade = surfaceY => {
-    if (!verticalSpan || !totalLayerContrast) return 1;
-    const position = Math.max(0, Math.min(1, (surfaceY - shadeLowY) / verticalSpan));
-    const sigmoid = 1 / (1 + Math.exp(-2 * (position - 0.5)));
-    const normalized = (sigmoid - sigmoidMin) / (sigmoidMax - sigmoidMin);
-    return 1 + totalLayerContrast * (0.5 - normalized);
-  };
-  for (let py = 0; py < outHeight; py++) for (let px = 0; px < outWidth; px++) {
-    const at = py * outWidth + px, dest = at * 4;
-    if (!raw[dest + 3]) continue;
-    const x = Math.floor(px / pixelSize), z = depth - 1 - Math.floor(py / pixelSize), height = heightGrid[z][x];
-    if (height === null) continue;
-    const shade = layerShade(height);
-    raw[dest] = Math.round(raw[dest] * shade); raw[dest + 1] = Math.round(raw[dest + 1] * shade); raw[dest + 2] = Math.round(raw[dest + 2] * shade);
-  }
+  // Legacy per-block strength remains readable; global Y bounds are obsolete.
+  const shadingStrength = Math.min(10, heightShadePerBlock / 0.018 * heightShadeMultiplier);
+  shadeTerrain(raw, terrainBuffer, terrainOwners, outWidth, outHeight, pixelSize, shadingStrength, surfaceShadeMultiplier);
   await sharp(raw, { raw: { width: outWidth, height: outHeight, channels: 4 } }).png().toFile(output);
   const highestBlockY = Number.isFinite(highY) ? Math.floor(highY) : 0;
   const lowestBlockY = Number.isFinite(lowY) ? Math.floor(lowY) : 0;
@@ -271,7 +266,7 @@ export async function renderOrthographic(schematic, { assets, output, pixelSize 
     materials: [...new Set(schematic.blocks.map(block => block.id))].sort(),
     unsupportedBlocks: [...diagnostics].sort(),
     specialBlockFallbacks: [...specialFallbacks].sort(),
-    renderer: { name: 'relic-ortho-model-rasterizer', version: 6, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, heightShadeMultiplier, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
+    renderer: { name: 'relic-ortho-model-rasterizer', version: 8, shading: 'local-structural-relief', shadingStrength, surfaceShadeMultiplier, textureSource: 'Minecraft 26.3 client assets (world_version 5023)', pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, heightShadeMultiplier, biomeTint: 'deterministic default biome colors; not sampled from world biomes', animation: 'first texture frame' }
   };
 }
 

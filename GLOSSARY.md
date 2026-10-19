@@ -11,12 +11,30 @@ _Avoid_: Layer, elevation
 **Section**:
 A named area within a floor, such as a cave or mansion.
 
+**Passage**:
+A route through the dungeon along which players can travel. Its ground may rise or fall within a floor.
+
+**Wall**:
+Raised terrain beside a passage that separates it from surrounding space or another passage. Its sides may rise abruptly or over several blocks.
+
 **Marker**:
 A point of interest anchored within a section, such as a chest, relic location, shop, or stair connection. It moves with that section in the displayed floor layout.
 _Avoid_: Pin
 
 **Player**:
-A visitor who views the dungeon map and chooses which marker types to display.
+A Minecraft player on the game server whose in-game position can be displayed on the dungeon map.
+
+**Visitor**:
+A person viewing the dungeon map website. Visiting the website does not create a tracked player position.
+
+**Calibration waypoint**:
+A reference block within a section whose actual Minecraft coordinates are known, tying the section's local coordinates to its location in the game world.
+
+**Tracking region**:
+A section's three-dimensional region in a Minecraft world used to determine whether a player is inside that section. It is independent of the section's placement in the displayed map.
+
+**Tracker point**:
+A saved location in a Minecraft world identifying the section a nearby player belongs to, and therefore its floor. It is a local hint for section membership shared by all players, independent of the calibration waypoint used to position them within that section.
 
 **Marker type**:
 A category of point of interest, such as relic, shop, chest, or stairs. A marker's type determines its legend group; its name identifies the individual location within that group.
@@ -31,7 +49,7 @@ The dungeon owner who maintains the map's geometry, layout, markers, and marker 
 The editable dungeon map, containing its floors, sections, and imported block geometry. Its geometry becomes independent of the source schematic after import.
 
 **Stair connection**:
-A bidirectional link between two stair markers, allowing a player to switch to the destination floor and location. An unlinked stair marker represents a destination that has not yet been mapped.
+A bidirectional link between two stair markers, allowing a visitor to switch to the destination floor and location. An unlinked stair marker represents a destination that has not yet been mapped.
 
 **Section connection**:
-A connection between entrance points in two sections on the same floor, shown as a dotted line to explain dungeon connectivity across the displayed layout. Its endpoints move with their sections; the line does not navigate.
+A link between two named exits in different sections. Each exit belongs to a section, retains local coordinates, and remains visible when unlinked. A dotted line joins linked exits on the same floor. Cross-floor exits show ?To ?? with the destination name and floor; clicking it navigates to the destination exit. Each exit can have one partner.

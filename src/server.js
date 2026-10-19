@@ -1,3 +1,6 @@
+import { listItemIcons, renderItemIcon } from './item-icons.js';
+import { createPlayerTracker, saveCalibration, trackingSections, overlappingRegions } from './player-tracking.js';
+import { createHeadCache, GENERIC_HEAD } from './player-heads.js';
 import express from 'express';
 import { Worker } from 'node:worker_threads';
 import path from 'node:path';
@@ -5,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, rm, readdir, access } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
-import { openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, transformSection, restoreSectionTransform, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
+import { saveExit, linkExits, removeExit, openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, transformSection, restoreSectionTransform, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
 import { createProjectBackup, restoreProjectBackup } from './backup-service.js';
@@ -25,7 +28,7 @@ function originAllowed(req) {
   catch { return false; }
 }
 
-export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, assetExtractor, renderer } = {}) {
+export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, assetExtractor, renderer, playerFetcher = fetch } = {}) {
   const app = express();
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
@@ -63,6 +66,8 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   let workerState = { ready: false, error: null };
   const minecraftAssetsDir = process.env.MINECRAFT_ASSETS ? path.resolve(process.env.MINECRAFT_ASSETS) : path.join(dataDir, 'assets', 'minecraft');
   const generation = createGenerationService({ dataDir, renderer: renderer ?? { render: renderInWorker }, assetsDir: minecraftAssetsDir });
+  const playerTracker = createPlayerTracker({ fetcher: playerFetcher });
+  const playerHead = createHeadCache(path.join(dataDir, 'player-heads'), playerFetcher);
   let activeWorker;
   let assetSetupBusy = false;
   const startWorker = (forceRender = false) => {
@@ -90,58 +95,19 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionDurationMs / 1000)}${secureCookies || req.secure ? '; Secure' : ''}`).json({ authenticated: true });
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
-  const itemTextureRoot = path.join(minecraftAssetsDir, 'textures', 'item');
-  const itemIconFiles = async (directory = itemTextureRoot, prefix = '') => {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-    return (await Promise.all(entries.map(entry => entry.isDirectory()
-      ? itemIconFiles(path.join(directory, entry.name), `${prefix}${entry.name}/`)
-      : entry.isFile() && entry.name.endsWith('.png') ? [`minecraft:${prefix}${entry.name.slice(0, -4)}`] : []))).flat();
-  };
-  const itemModelIds = async (directory = path.join(minecraftAssetsDir, 'models', 'item'), prefix = '') => {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-    return (await Promise.all(entries.map(entry => entry.isDirectory()
-      ? itemModelIds(path.join(directory, entry.name), `${prefix}${entry.name}/`)
-      : entry.isFile() && entry.name.endsWith('.json') ? [`minecraft:${prefix}${entry.name.slice(0, -5)}`] : []))).flat();
-  };
+  const iconRoots = [path.join(dataDir, 'assets', 'resource-pack'), minecraftAssetsDir];
   app.get('/api/item-icons', async (_req, res) => {
-    try {
-      const ids = new Set(await itemIconFiles());
-      for (const id of await itemModelIds()) ids.add(id);
-      res.set('Cache-Control', 'no-cache').json([...ids].sort().map(id => ({ id, name: id.slice('minecraft:'.length).replaceAll('_', ' ') })));
-    }
-    catch { res.status(503).json({ error: 'Minecraft item textures are not available. Re-run Minecraft asset setup in Edit.' }); }
+    try { res.set('Cache-Control', 'no-cache').json(await listItemIcons(iconRoots)); }
+    catch { res.status(503).json({ error: 'Minecraft inventory icons are not available. Re-run Minecraft asset setup in Edit.' }); }
   });
   app.get('/api/item-icon', async (req, res) => {
     const id = typeof req.query.id === 'string' ? req.query.id : '';
-    const relative = id.startsWith('minecraft:') ? id.slice('minecraft:'.length) : '';
-    if (!/^[a-z0-9_./-]+$/.test(relative) || relative.split('/').some(part => part === '..' || part === '.')) return res.status(400).end();
-    const roots = [path.join(dataDir, 'assets', 'resource-pack'), minecraftAssetsDir];
-    const resolveTexture = async (modelPath, seen = new Set()) => {
-      if (seen.size > 8 || seen.has(modelPath)) return null;
-      seen.add(modelPath);
-      let model;
-      try { model = JSON.parse(await readFile(path.join(roots[0], 'models', `${modelPath}.json`), 'utf8')); }
-      catch { try { model = JSON.parse(await readFile(path.join(roots[1], 'models', `${modelPath}.json`), 'utf8')); } catch { return null; } }
-      const textures = model.textures ?? {};
-      const pick = key => {
-        let value = textures[key], count = 0;
-        while (typeof value === 'string' && value.startsWith('#') && count++ < 8) value = textures[value.slice(1)];
-        return typeof value === 'string' && !value.startsWith('#') ? value : null;
-      };
-      for (const key of ['layer0','all','top','side','particle']) { const texture = pick(key); if (texture) return texture; }
-      if (typeof model.parent === 'string' && model.parent.startsWith('minecraft:')) return resolveTexture(model.parent.slice('minecraft:'.length), seen);
-      return null;
-    };
-    const texture = await resolveTexture(`item/${relative}`);
-    const candidates = [];
-    if (texture) candidates.push(path.resolve(roots[0], 'textures', `${texture}.png`), path.resolve(roots[1], 'textures', `${texture}.png`));
-    candidates.push(path.resolve(roots[0], 'textures', 'item', `${relative}.png`), path.resolve(roots[1], 'textures', 'item', `${relative}.png`));
-    for (const candidate of candidates) {
-      const root = candidate.startsWith(`${path.resolve(roots[0])}${path.sep}`) ? path.resolve(roots[0]) : path.resolve(roots[1]);
-      if (!candidate.startsWith(`${root}${path.sep}`)) continue;
-      try { await access(candidate); return res.set('Cache-Control', 'no-cache').type('png').send(await readFile(candidate)); } catch { /* try the next Minecraft texture source */ }
-    }
-    res.status(404).end();
+    if (!/^minecraft:[a-z0-9_./-]+$/.test(id) || id.slice(10).split('/').some(part => part === '..' || part === '.')) return res.status(400).end();
+    try {
+      const icon = await renderItemIcon(iconRoots, id);
+      if (!icon) return res.status(404).end();
+      return res.set('Cache-Control', 'no-cache').type('png').send(icon);
+    } catch { return res.status(404).end(); }
   });
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
     const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); sectionTransformHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
@@ -167,6 +133,36 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   for (const namespace of ['/api/editor', '/api/assets', '/api/project', '/api/backups', '/api/generation', '/api/setup']) app.use(namespace, protectNamespace);
 
   app.get('/health', (_req, res) => res.status(workerState.ready ? 200 : 503).json({ status: workerState.ready ? 'ok' : 'starting', worker: workerState }));
+  app.get('/api/players', async (_req, res) => {
+    if (restoreBusy) return res.status(503).json({ error: 'Project restore in progress.' });
+    try {
+      const manifest = await generation.currentManifest();
+      res.set('Cache-Control', 'no-store').json({ ...await playerTracker.snapshot(manifest), projectRevision: manifest.projectRevision });
+    } catch { res.status(503).json({ error: 'The saved map is unavailable.' }); }
+  });
+  app.get('/api/players/:uuid/head', async (req, res) => {
+    const uuid = req.params.uuid;
+    if (!/^[a-f0-9]{32}$/.test(uuid) || !playerTracker.knows(uuid)) return res.status(404).end();
+    const head = await playerHead(uuid);
+    res.set('Cache-Control', head ? 'public, max-age=3600' : 'public, max-age=60').type(head ? 'png' : 'svg').send(head ?? GENERIC_HEAD);
+  });
+  app.get('/api/project/tracking', requireEditor, async (_req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const snapshot = snapshotProject(db), sections = trackingSections(snapshot);
+      const live = await playerTracker.snapshot(snapshot, true);
+      res.set('Cache-Control', 'no-store').json({ ...live, sections, revision: snapshot.revision, overlaps: overlappingRegions(sections) });
+    } finally { db.close(); }
+  });
+  for (const method of ['put', 'delete']) app[method]('/api/project/sections/:id/waypoint', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const result = saveCalibration(db, req.params.id, method === 'delete' ? null : req.body?.calibration, req.body?.expectedRevision);
+      try { await generation.saveMetadata(snapshotProject(db)); res.json({ ...result, saved: true }); }
+      catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message }); }
+    } catch (error) { res.status(/another editor tab/.test(error.message) ? 409 : 400).json({ error: error.message }); }
+    finally { db.close(); }
+  });
   app.get('/api/map/manifest', async (_req, res) => {
     if (restoreBusy) return res.status(503).json({ error: 'The map is being restored. Refresh after the restore completes.' });
     try {
@@ -463,6 +459,21 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     try { await generation.saveMetadata(snapshotProject(db)); return res.status(statusCode).json({ ...result, ...payload, saved: true, status: generation.queue.status }); }
     catch (error) { return res.status(202).json({ ...result, ...payload, saved: false, warning: error.message, status: generation.queue.status }); }
   };
+  for (const [method, route, action] of [
+    ['post', '/api/project/exits', (db, req) => saveExit(db, req.body.exit, req.body.expectedRevision)],
+    ['put', '/api/project/exits/:id', (db, req) => saveExit(db, req.body.exit, req.body.expectedRevision, req.params.id)],
+    ['post', '/api/project/exits/:id/link', (db, req) => linkExits(db, req.params.id, req.body.destinationId, req.body.expectedRevision)],
+    ['post', '/api/project/exits/:id/unlink', (db, req) => removeExit(db, req.params.id, req.body.expectedRevision, true)],
+    ['delete', '/api/project/exits/:id', (db, req) => removeExit(db, req.params.id, req.body.expectedRevision)],
+  ]) app[method](route, requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      if (!Number.isSafeInteger(req.body?.expectedRevision)) return res.status(400).json({ error: 'A project revision is required.' });
+      const result = action(db, req);
+      return await publishConnections(db, res, 200, result);
+    } catch (error) { return res.status(409).json({ error: error.message }); }
+    finally { db.close(); }
+  });
   app.post('/api/project/connections', requireEditor, requireSameOrigin, async (req, res) => {
     const db = openProject(path.join(dataDir, 'project.sqlite'));
     try {
@@ -664,6 +675,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       const result = importSchematicSection(db, schematic, {
         floorId: req.get('x-floor-id') || null,
         floorName: req.get('x-floor-name') || 'Floor 0',
+        position: req.get('x-section-position') || null,
         sectionName: req.get('x-section-name') || path.basename(req.get('x-source-name') || 'Imported section', '.litematic')
       });
       const savedRevision = projectRevision(db);

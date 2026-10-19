@@ -1,5 +1,38 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap');
 :root { color-scheme: dark; font-family: Manrope, system-ui, sans-serif; color: #e8e5dc; background: #101414; }
+.players-panel { position: fixed; right: 14px; top: 82px; z-index: 3; width: 240px; max-height: calc(100vh - 110px); overflow: auto; padding: 14px; border: 1px solid #354038; border-radius: 8px; background: #171d1bf2; box-shadow: 0 16px 50px #0008; }
+.players-panel summary { cursor: pointer; font: 12px 'DM Mono', monospace; color: #c5d8b6; }
+#player-count { float: right; border-radius: 4px; padding: 0 6px; background: #354038; }
+#players-status { color: #a6afa5; font-size: 11px; line-height: 1.5; }
+#player-follow { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; color: #d9e8b7; font-size: 11px; }
+#player-follow[hidden] { display: none; }
+#player-follow span { flex: 1; overflow-wrap: anywhere; }
+.player-row { display: flex; align-items: center; gap: 10px; width: 100%; height: auto; min-height: 52px; margin-top: 6px; padding: 8px; text-align: left; }
+.player-row img { width: 28px; height: 28px; image-rendering: pixelated; border-radius: 3px; }
+.player-row span { min-width: 0; }
+.player-row strong, .player-row small { display: block; overflow-wrap: anywhere; }
+.player-row strong { font: 600 12px Manrope, sans-serif; }
+.player-row small { margin-top: 4px; color: #a6afa5; font-size: 10px; }
+.player-row[aria-pressed="true"] { border-color: #b8d597; background: #34452e; }
+#player-layer { position: absolute; inset: 0; pointer-events: none; }
+.player-head { position: absolute; z-index: 3; pointer-events: auto; width: 30px; min-width: 30px; height: 30px; padding: 2px; border: 1px solid #e4eddb; border-radius: 4px; background: #17211e; box-shadow: 0 2px 8px #000c; transform-origin: center; }
+.player-head img { display: block; width: 24px; height: 24px; image-rendering: pixelated; }
+.player-head.following { outline: 2px solid #b8d597; outline-offset: 3px; }
+#player-layer.stale { opacity: .45; }
+#waypoint-layer { position: absolute; inset: 0; pointer-events: none; }
+.calibration-waypoint { position: absolute; pointer-events: auto; min-width: 28px; width: 28px; height: 28px; padding: 0; border: 1px solid #f3cf72; color: #f3cf72; background: #17211ee8; font-size: 23px; }
+.calibration-waypoint.invalid { color: #f5a89b; border-color: #f5a89b; }
+.tracking-coordinates { display: flex; gap: 6px; }
+.tracking-coordinates label { flex: 1; min-width: 0; }
+.tracking-coordinates input { width: 100%; min-width: 0; }
+#waypoint-form input { width: 100%; padding: 7px; color: #e5e7df; background: #202825; border: 1px solid #37413b; border-radius: 5px; font: 12px Manrope, sans-serif; }
+#waypoint-form button { margin: 4px 0; }
+#waypoint-form fieldset { border: 1px solid #37413b; border-radius: 5px; padding: 8px; margin: 10px 0; }
+#waypoint-form legend { font-size: 11px; }
+#waypoint-form p, #tracking-calibration-state { font-size: 11px; }
+#tracking-overlaps { color: #f3cf72; white-space: pre-wrap; }
+#tracking-diagnostics { white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.6 'DM Mono', monospace; padding: 8px; background: #101513; }
+@media (max-width: 600px) { .players-panel { top: auto; bottom: 12px; right: 10px; width: 200px; max-height: 36vh; padding: 10px; } }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; height: 100vh; overflow: hidden; }
 .toolbar { height: 68px; display: flex; align-items: center; gap: 30px; padding: 0 24px; background: #171d1b; border-bottom: 1px solid #2d3530; box-shadow: 0 4px 20px #0005; position: relative; z-index: 2; }
@@ -47,9 +80,9 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #setup-status, #login-status { min-height: 20px; }
 .map-caption { position: absolute; left: 19px; bottom: 17px; padding: 9px 12px; border-radius: 5px; background: #171d1bdb; border: 1px solid #303a34; color: #b5c1ac; font: 10px 'DM Mono', monospace; letter-spacing: .06em; }
 #marker-layer { position: absolute; inset: 0; pointer-events: none; }
-.map-marker { position: absolute; z-index: 2; width: 28px; height: 28px; min-width: 28px; padding: 2px; border: 2px solid #fff; border-radius: 50%; background-color: #18201d; transform: translate(-50%,-50%); box-shadow: 0 0 0 3px #101512bd, 0 2px 8px #000b; pointer-events: auto; transition: transform 120ms ease, box-shadow 120ms ease; }
+.map-marker { position: absolute; z-index: 2; width: 28px; height: 28px; min-width: 28px; padding: 2px; border: 2px solid #fff; border-radius: 50%; background-color: #18201d; transform: translate(-50%,-50%) scale(var(--marker-scale, 1)); box-shadow: 0 0 0 3px #101512bd, 0 2px 8px #000b; pointer-events: auto; transition: box-shadow 120ms ease; }
 .map-marker img { display: block; width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
-.map-marker:hover, .map-marker:focus-visible { z-index: 8; transform: translate(-50%,-50%) scale(1.16); box-shadow: 0 0 0 4px #101512d9, 0 4px 12px #000d; }
+.map-marker:hover, .map-marker:focus-visible { z-index: 8; transform: translate(-50%,-50%) scale(var(--marker-scale, 1)); box-shadow: 0 0 0 4px #101512d9, 0 4px 12px #000d; }
 .map-marker[hidden] { display: none; }
 .map-marker.highlighted { outline: 3px solid #f2d36b; outline-offset: 3px; z-index: 2; }
 #marker-layer.editing .map-marker { cursor: move; touch-action: none; }
@@ -97,3 +130,11 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
   .sidebar-reopen { left: 10px; top: 68px; }
   #block-inspector { top: auto; right: 10px; bottom: 10px; max-height: 46vh; }
 }
+
+.section-connection-target { pointer-events: all; cursor: pointer; transform-box: view-box; transform: scale(var(--exit-scale, 1)); }
+.section-connection-target:focus .section-connection-endpoint { stroke: white; stroke-width: 4; }
+
+.marker-size-setting { padding: 12px 0; border-bottom: 1px solid #37413b; margin-bottom: 12px; font-size: 12px; }
+.marker-size-setting label, .marker-size-setting output { display: block; }
+.marker-size-setting input { width: 100%; margin: 10px 0; accent-color: #b8d597; }
+.marker-size-setting output { color: #a6afa5; font-size: 11px; }

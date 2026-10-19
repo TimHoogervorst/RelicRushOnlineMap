@@ -15,7 +15,7 @@ try {
   const assetsDir = workerData.assetsDir;
   if (workerData.clientJar && existsSync(workerData.clientJar)) {
     let hasItemTextures = false;
-    try { const source = JSON.parse(await readFile(path.join(assetsDir, 'asset-source.json'), 'utf8')); hasItemTextures = Number.isInteger(source.itemTextures) && source.itemTextures > 0; }
+    try { const source = JSON.parse(await readFile(path.join(assetsDir, 'asset-source.json'), 'utf8')); hasItemTextures = Number.isInteger(source.itemTextures) && source.itemTextures > 0 && Number.isInteger(source.itemDefinitions) && source.itemDefinitions > 0; }
     catch { /* extract assets below */ }
     if (!hasItemTextures) await extractMatchingAssets(workerData.clientJar, assetsDir);
   }

@@ -1,6 +1,7 @@
 import { renderOrthographic as renderRasterizer } from './renderer.js';
 
 export interface RenderBlock {
+  sectionId?: string;
   x: number;
   y: number;
   z: number;

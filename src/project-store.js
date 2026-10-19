@@ -3,6 +3,8 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { decodeLitematic } from './litematic.js';
+import { sectionPlacement, sectionDirections } from '../public/section-placement.js';
+import { DEFAULT_TRACKING_ORIENTATION, upgradeCalibration } from './tracking-coordinates.js';
 
 const CHUNK_SIZE = 16;
 const localIndex = (x, y, z) => (y * CHUNK_SIZE + z) * CHUNK_SIZE + x;
@@ -58,17 +60,13 @@ export function openProject(path) {
     CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id), type TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', x REAL NOT NULL, z REAL NOT NULL, stair_destination_id TEXT REFERENCES markers(id), icon TEXT);
     CREATE TABLE IF NOT EXISTS custom_marker_types (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS section_connections (id TEXT PRIMARY KEY, section_a_id TEXT NOT NULL REFERENCES sections(id), x_a REAL NOT NULL, z_a REAL NOT NULL, section_b_id TEXT NOT NULL REFERENCES sections(id), x_b REAL NOT NULL, z_b REAL NOT NULL, label TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT 'minecraft:oak_stairs', CHECK(section_a_id <> section_b_id));
-    CREATE TRIGGER IF NOT EXISTS section_connection_same_floor_insert BEFORE INSERT ON section_connections
-      WHEN (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_b_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) <> (SELECT floor_id FROM sections WHERE id=NEW.section_b_id)
-      BEGIN SELECT RAISE(ABORT, 'Section connections must join sections on the same floor.'); END;
-    CREATE TRIGGER IF NOT EXISTS section_connection_same_floor_update BEFORE UPDATE OF section_a_id,section_b_id ON section_connections
-      WHEN (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_b_id) IS NULL OR (SELECT floor_id FROM sections WHERE id=NEW.section_a_id) <> (SELECT floor_id FROM sections WHERE id=NEW.section_b_id)
-      BEGIN SELECT RAISE(ABORT, 'Section connections must join sections on the same floor.'); END;
-    CREATE TRIGGER IF NOT EXISTS section_connection_floor_reassignment BEFORE UPDATE OF floor_id ON sections
-      WHEN EXISTS(SELECT 1 FROM section_connections c JOIN sections other ON other.id=CASE WHEN c.section_a_id=OLD.id THEN c.section_b_id ELSE c.section_a_id END WHERE (c.section_a_id=OLD.id OR c.section_b_id=OLD.id) AND other.floor_id<>NEW.floor_id)
-      BEGIN SELECT RAISE(ABORT, 'Remove section connections before moving this section to another floor.'); END;
+    DROP TRIGGER IF EXISTS section_connection_same_floor_insert;
+    DROP TRIGGER IF EXISTS section_connection_same_floor_update;
+    DROP TRIGGER IF EXISTS section_connection_floor_reassignment;
   `);
   const sectionColumns = new Set(db.pragma('table_info(sections)').map(column => column.name));
+  if (!sectionColumns.has('calibration_json')) db.exec('ALTER TABLE sections ADD COLUMN calibration_json TEXT');
+  if (!sectionColumns.has('tracking_orientation_json')) db.exec('ALTER TABLE sections ADD COLUMN tracking_orientation_json TEXT');
   if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
   if (!sectionColumns.has('label_z')) db.exec('ALTER TABLE sections ADD COLUMN label_z REAL NOT NULL DEFAULT 0');
   if (!sectionColumns.has('sort_order')) db.exec('ALTER TABLE sections ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
@@ -76,7 +74,29 @@ export function openProject(path) {
   if (!markerColumns.has('icon')) db.exec('ALTER TABLE markers ADD COLUMN icon TEXT');
   const connectionColumns = new Set(db.pragma('table_info(section_connections)').map(column => column.name));
   if (!connectionColumns.has('icon')) db.exec("ALTER TABLE section_connections ADD COLUMN icon TEXT NOT NULL DEFAULT 'minecraft:oak_stairs'");
+  db.exec(`CREATE TABLE IF NOT EXISTS section_exits (
+    id TEXT PRIMARY KEY, section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    x REAL NOT NULL, z REAL NOT NULL, name TEXT NOT NULL,
+    connection_id TEXT REFERENCES section_connections(id) ON DELETE SET NULL,
+    side TEXT CHECK(side IN ('A','B')), UNIQUE(connection_id,side)
+  )`);
+  ensureConnectionExits(db);
   db.prepare("INSERT OR IGNORE INTO project_meta(key,value) VALUES('revision','0')").run();
+  if (!db.prepare("SELECT value FROM project_meta WHERE key='tracking_coordinates_v2'").get()) {
+    db.transaction(() => {
+      let changed = false;
+      for (const section of db.prepare('SELECT id,calibration_json FROM sections WHERE calibration_json IS NOT NULL').all()) {
+        const old = JSON.parse(section.calibration_json);
+        const next = upgradeCalibration(old, readSectionBlocks(db, section.id));
+        if (next !== old) {
+          db.prepare('UPDATE sections SET calibration_json=? WHERE id=?').run(JSON.stringify(next), section.id);
+          changed = true;
+        }
+      }
+      if (changed) advanceProjectRevision(db, projectRevision(db));
+      db.prepare("INSERT INTO project_meta(key,value) VALUES('tracking_coordinates_v2','1')").run();
+    })();
+  }
   return db;
 }
 
@@ -85,7 +105,70 @@ export function projectRevision(db) {
   return Number.isSafeInteger(Number(value)) ? Number(value) : 0;
 }
 
-const LIFECYCLE_TABLES = ['floors','sections','markers','section_connections','section_chunks','section_render_settings'];
+// Convert existing connection endpoints without changing their saved positions.
+function ensureConnectionExits(db) {
+  for (const c of db.prepare('SELECT * FROM section_connections').all()) {
+    for (const side of ['A', 'B']) {
+      const key = side.toLowerCase();
+      if (!db.prepare('SELECT 1 FROM section_exits WHERE connection_id=? AND side=?').get(c.id, side)) {
+        const name = c.label ? `${c.label} ${side}` : `Exit ${side}`;
+        db.prepare('INSERT INTO section_exits(id,section_id,x,z,name,connection_id,side) VALUES(?,?,?,?,?,?,?)')
+          .run(randomUUID(), c[`section_${key}_id`], c[`x_${key}`], c[`z_${key}`], name, c.id, side);
+      }
+    }
+  }
+}
+
+export function saveExit(db, input, expectedRevision, id = null) {
+  if (expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  const name = floorName(input?.name);
+  return db.transaction(() => {
+    if (id) {
+      if (!db.prepare('UPDATE section_exits SET name=? WHERE id=?').run(name, id).changes) throw new Error('Exit does not exist.');
+    } else {
+      const section = db.prepare('SELECT bounds_json FROM sections WHERE id=?').get(input.sectionId);
+      if (!section) throw new Error('Section does not exist.');
+      const bounds = JSON.parse(section.bounds_json);
+      if (![input.x, input.z].every(Number.isFinite) || input.x < 0 || input.z < 0 || input.x > bounds.x || input.z > bounds.z) throw new Error('Exit must be inside its section.');
+      id = randomUUID();
+      db.prepare('INSERT INTO section_exits(id,section_id,x,z,name) VALUES(?,?,?,?,?)').run(id, input.sectionId, input.x, input.z, name);
+    }
+    advanceProjectRevision(db, expectedRevision);
+    return { id, revision: expectedRevision + 1 };
+  })();
+}
+
+export function linkExits(db, firstId, secondId, expectedRevision) {
+  if (expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  return db.transaction(() => {
+    const a = db.prepare('SELECT * FROM section_exits WHERE id=?').get(firstId);
+    const b = db.prepare('SELECT * FROM section_exits WHERE id=?').get(secondId);
+    if (!a || !b || a.id === b.id) throw new Error('Choose two different exits.');
+    if (a.connection_id || b.connection_id) throw new Error('Unlink the existing destination before linking these exits.');
+    if (a.section_id === b.section_id) throw new Error('Choose exits in different sections.');
+    const id = randomUUID();
+    db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b) VALUES(?,?,?,?,?,?,?)')
+      .run(id, a.section_id, a.x, a.z, b.section_id, b.x, b.z);
+    db.prepare("UPDATE section_exits SET connection_id=?,side='A' WHERE id=?").run(id, a.id);
+    db.prepare("UPDATE section_exits SET connection_id=?,side='B' WHERE id=?").run(id, b.id);
+    advanceProjectRevision(db, expectedRevision);
+    return { id, revision: expectedRevision + 1 };
+  })();
+}
+
+export function removeExit(db, id, expectedRevision, unlinkOnly = false) {
+  if (expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
+  return db.transaction(() => {
+    const exit = db.prepare('SELECT * FROM section_exits WHERE id=?').get(id);
+    if (!exit) throw new Error('Exit does not exist.');
+    if (exit.connection_id) db.prepare('DELETE FROM section_connections WHERE id=?').run(exit.connection_id);
+    if (!unlinkOnly) db.prepare('DELETE FROM section_exits WHERE id=?').run(id);
+    advanceProjectRevision(db, expectedRevision);
+    return { revision: expectedRevision + 1 };
+  })();
+}
+
+const LIFECYCLE_TABLES = ['floors','sections','markers','section_connections','section_exits','section_chunks','section_render_settings'];
 
 /** Capture lifecycle-managed rows so a session command can reverse a compound delete or reassignment. */
 export function captureProjectLifecycleState(db) {
@@ -116,7 +199,7 @@ export function restoreProjectLifecycleState(db, state, expectedRevision) {
       db.prepare(`INSERT INTO markers(${columns.join(',')},stair_destination_id) VALUES(${columns.map(() => '?').join(',')},NULL)`).run(...columns.map(column => row[column]));
     }
     for (const marker of state.markers) if (marker.stair_destination_id) db.prepare('UPDATE markers SET stair_destination_id=? WHERE id=?').run(marker.stair_destination_id, marker.id);
-    insertRows('section_connections');
+    insertRows('section_connections'); insertRows('section_exits');
     advanceProjectRevision(db, expectedRevision);
   });
   tx(); return { revision: expectedRevision + 1 };
@@ -234,16 +317,14 @@ export function deleteFloorLifecycle(db, id, resolution, expectedRevision) {
   const tx = db.transaction(() => {
     if (destination) {
       const set = new Set(sections);
-      const internalConnections = db.prepare('SELECT * FROM section_connections').all().filter(link => set.has(link.section_a_id) && set.has(link.section_b_id));
       for (const sectionId of sections) {
         const links = db.prepare('SELECT section_a_id AS a,section_b_id AS b FROM section_connections WHERE section_a_id=? OR section_b_id=?').all(sectionId, sectionId);
         if (links.some(link => !set.has(link.a) || !set.has(link.b))) throw new Error('Remove or relink section connections before reassigning this floor.');
         const stair = db.prepare(`SELECT m.id FROM markers m JOIN markers p ON p.id=m.stair_destination_id JOIN sections s ON s.id=p.section_id WHERE m.section_id=? AND s.floor_id=?`).get(sectionId, destination);
         if (stair) throw new Error('Unlink stairs before reassigning this floor; both endpoints would be on one floor.');
       }
-      for (const link of internalConnections) db.prepare('DELETE FROM section_connections WHERE id=?').run(link.id);
       for (const sectionId of sections) db.prepare('UPDATE sections SET floor_id=? WHERE id=?').run(destination, sectionId);
-      for (const link of internalConnections) db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label,icon) VALUES(?,?,?,?,?,?,?,?,?)').run(link.id,link.section_a_id,link.x_a,link.z_a,link.section_b_id,link.x_b,link.z_b,link.label,link.icon ?? 'minecraft:oak_stairs');
+
     }
     if (db.prepare('SELECT 1 FROM sections WHERE floor_id=?').get(id)) throw new Error('Resolve all sections before deleting this floor.');
     const order = db.prepare('SELECT sort_order FROM floors WHERE id=?').get(id).sort_order;
@@ -493,7 +574,6 @@ function validateConnection(input) {
 function validateConnectionSections(db, input) {
   const sections = [input.sectionAId, input.sectionBId].map(id => db.prepare('SELECT id,floor_id,bounds_json FROM sections WHERE id=?').get(id));
   if (sections.some(section => !section)) throw new Error('Choose existing owning sections.');
-  if (sections[0].floor_id !== sections[1].floor_id) throw new Error('Connected sections must be on the same floor.');
   for (const [index, section] of sections.entries()) {
     const x = index === 0 ? input.xA : input.xB, z = index === 0 ? input.zA : input.zB;
     const bounds = JSON.parse(section.bounds_json);
@@ -502,10 +582,10 @@ function validateConnectionSections(db, input) {
 }
 
 export function readSectionConnection(db, id) {
-  return db.prepare('SELECT id,section_a_id AS sectionAId,x_a AS xA,z_a AS zA,section_b_id AS sectionBId,x_b AS xB,z_b AS zB,label,icon FROM section_connections WHERE id=?').get(id) ?? null;
+  return db.prepare(`SELECT id,section_a_id AS sectionAId,x_a AS xA,z_a AS zA,section_b_id AS sectionBId,x_b AS xB,z_b AS zB,label,icon,(SELECT id FROM section_exits WHERE connection_id=section_connections.id AND side='A') AS exitAId,(SELECT id FROM section_exits WHERE connection_id=section_connections.id AND side='B') AS exitBId FROM section_connections WHERE id=?`).get(id) ?? null;
 }
 
-/** Save a visual-only connection using section-local anchors and a project revision. */
+/** Save a navigable connection using section-local anchors and a project revision. */
 export function saveSectionConnection(db, input, expectedRevision, id = null) {
   validateConnection(input);
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== projectRevision(db)) throw new Error('This project changed in another editor tab. Reload and retry your edit.');
@@ -519,6 +599,9 @@ export function saveSectionConnection(db, input, expectedRevision, id = null) {
       id = randomUUID();
       db.prepare('INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label,icon) VALUES(?,?,?,?,?,?,?,?,?)').run(id, input.sectionAId, input.xA, input.zA, input.sectionBId, input.xB, input.zB, label, validateItemIcon(input.icon) ?? 'minecraft:oak_stairs');
     }
+    ensureConnectionExits(db);
+    db.prepare("UPDATE section_exits SET section_id=?,x=?,z=? WHERE connection_id=? AND side='A'").run(input.sectionAId,input.xA,input.zA,id);
+    db.prepare("UPDATE section_exits SET section_id=?,x=?,z=? WHERE connection_id=? AND side='B'").run(input.sectionBId,input.xB,input.zB,id);
     advanceProjectRevision(db, expectedRevision);
   });
   tx();
@@ -545,6 +628,11 @@ export function restoreSectionConnection(db, id, connection, expectedRevision) {
       db.prepare(`INSERT INTO section_connections(id,section_a_id,x_a,z_a,section_b_id,x_b,z_b,label,icon) VALUES(?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET section_a_id=excluded.section_a_id,x_a=excluded.x_a,z_a=excluded.z_a,section_b_id=excluded.section_b_id,x_b=excluded.x_b,z_b=excluded.z_b,label=excluded.label,icon=excluded.icon`)
         .run(id, connection.sectionAId, connection.xA, connection.zA, connection.sectionBId, connection.xB, connection.zB, connection.label ?? '', validateItemIcon(connection.icon) ?? 'minecraft:oak_stairs');
+      for (const side of ['A', 'B']) if (connection[`exit${side}Id`]) {
+        db.prepare('UPDATE section_exits SET connection_id=?,side=?,section_id=?,x=?,z=? WHERE id=?')
+          .run(id, side, connection[`section${side}Id`], connection[`x${side}`], connection[`z${side}`], connection[`exit${side}Id`]);
+      }
+      ensureConnectionExits(db);
     }
     advanceProjectRevision(db, expectedRevision);
   });
@@ -555,19 +643,21 @@ export function restoreSectionConnection(db, id, connection, expectedRevision) {
 export function snapshotProject(db) {
   const revision = projectRevision(db);
   const renderOptionsRow = db.prepare("SELECT value FROM project_meta WHERE key='render_options'").get();
-  const renderOptions = renderOptionsRow ? JSON.parse(renderOptionsRow.value) : { pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1 };
+  const renderOptions = renderOptionsRow ? JSON.parse(renderOptionsRow.value) : { pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1, surfaceShadeMultiplier: 0 };
   const markerTypes = listMarkerTypes(db);
   const floors = db.prepare('SELECT id,name,sort_order AS sortOrder FROM floors ORDER BY sort_order,id').all();
   const unresolvedRecords = {
     sections: db.prepare('SELECT s.id,s.floor_id AS floorId FROM sections s LEFT JOIN floors f ON f.id=s.floor_id WHERE f.id IS NULL').all(),
     markers: db.prepare('SELECT m.id,m.section_id AS sectionId FROM markers m LEFT JOIN sections s ON s.id=m.section_id WHERE s.id IS NULL').all(),
     stairs: db.prepare(`SELECT m.id,m.stair_destination_id AS destinationId FROM markers m LEFT JOIN markers p ON p.id=m.stair_destination_id LEFT JOIN sections s ON s.id=p.section_id WHERE m.stair_destination_id IS NOT NULL AND (p.id IS NULL OR p.type<>'stairs' OR s.id IS NULL)`).all(),
-    connections: db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.section_b_id AS sectionBId FROM section_connections c LEFT JOIN sections a ON a.id=c.section_a_id LEFT JOIN sections b ON b.id=c.section_b_id WHERE a.id IS NULL OR b.id IS NULL OR a.floor_id<>b.floor_id`).all()
+    connections: db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.section_b_id AS sectionBId FROM section_connections c LEFT JOIN sections a ON a.id=c.section_a_id LEFT JOIN sections b ON b.id=c.section_b_id WHERE a.id IS NULL OR b.id IS NULL`).all()
   };
   return { revision, unresolvedRecords, floors: floors.map(floor => {
-    const sections = db.prepare(`SELECT s.id,s.name,s.bounds_json,s.placement_x,s.placement_z,s.label_x,s.label_z,s.sort_order,r.settings_json
+    const sections = db.prepare(`SELECT s.id,s.name,s.bounds_json,s.placement_x,s.placement_z,s.label_x,s.label_z,s.sort_order,s.calibration_json,s.tracking_orientation_json,r.settings_json
       FROM sections s LEFT JOIN section_render_settings r ON r.section_id=s.id WHERE s.floor_id=? ORDER BY s.sort_order,s.id`).all(floor.id).map(row => ({
       id: row.id, name: row.name, sortOrder: row.sort_order, bounds: JSON.parse(row.bounds_json), placementX: row.placement_x, placementZ: row.placement_z, labelX: row.label_x, labelZ: row.label_z,
+      calibration: row.calibration_json ? JSON.parse(row.calibration_json) : null,
+      trackingOrientation: row.tracking_orientation_json ? JSON.parse(row.tracking_orientation_json) : [...DEFAULT_TRACKING_ORIENTATION],
       renderSettings: { ...(row.settings_json ? JSON.parse(row.settings_json) : defaultSectionRenderSettings()), ...renderOptions }
     }));
     const sectionBlocks = new Map(sections.map(section => [section.id, readSectionBlocks(db, section.id)]));
@@ -592,17 +682,24 @@ export function snapshotProject(db) {
       z: sectionLocalToFloor({ placementX: marker.sectionX, placementZ: marker.sectionZ }, { x: marker.x, z: marker.z }, { x: minX, z: minZ }).z,
       localX: marker.x, localZ: marker.z, stairDestinationId: marker.stairDestinationId
     }));
-    const connections = db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.x_a AS xA,c.z_a AS zA,c.section_b_id AS sectionBId,c.x_b AS xB,c.z_b AS zB,c.label,c.icon,s1.placement_x AS ax,s1.placement_z AS az,s2.placement_x AS bx,s2.placement_z AS bz FROM section_connections c JOIN sections s1 ON s1.id=c.section_a_id JOIN sections s2 ON s2.id=c.section_b_id WHERE s1.floor_id=? ORDER BY c.id`).all(floor.id).map(connection => ({
-      id: connection.id, sectionAId: connection.sectionAId, xA: connection.xA, zA: connection.zA, sectionBId: connection.sectionBId, xB: connection.xB, zB: connection.zB, label: connection.label, icon: connection.icon,
-      displayA: { x: connection.ax + connection.xA - minX, z: connection.az + connection.zA - minZ },
-      displayB: { x: connection.bx + connection.xB - minX, z: connection.bz + connection.zB - minZ }
+    const connections = db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.x_a AS xA,c.z_a AS zA,c.section_b_id AS sectionBId,c.x_b AS xB,c.z_b AS zB,c.label,c.icon,s1.floor_id AS floorAId,s2.floor_id AS floorBId,s1.placement_x AS ax,s1.placement_z AS az,s2.placement_x AS bx,s2.placement_z AS bz FROM section_connections c JOIN sections s1 ON s1.id=c.section_a_id JOIN sections s2 ON s2.id=c.section_b_id WHERE s1.floor_id=? OR s2.floor_id=? ORDER BY c.id`).all(floor.id, floor.id).map(connection => ({
+      id: connection.id, floorAId: connection.floorAId, floorBId: connection.floorBId, sectionAId: connection.sectionAId, xA: connection.xA, zA: connection.zA, sectionBId: connection.sectionBId, xB: connection.xB, zB: connection.zB, label: connection.label, icon: connection.icon,
+      displayA: connection.floorAId === floor.id ? { x: connection.ax + connection.xA - minX, z: connection.az + connection.zA - minZ } : null,
+      displayB: connection.floorBId === floor.id ? { x: connection.bx + connection.xB - minX, z: connection.bz + connection.zB - minZ } : null
     }));
-    return { ...floor, renderOptions, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections, markerTypes };
+    const exits = db.prepare(`SELECT e.id,e.section_id AS sectionId,e.x AS localX,e.z AS localZ,e.name,e.connection_id AS connectionId,e.side,
+      s.placement_x + e.x AS x,s.placement_z + e.z AS z,p.id AS destinationId,p.name AS destinationName,
+      p.section_id AS destinationSectionId,ds.floor_id AS destinationFloorId
+      FROM section_exits e JOIN sections s ON s.id=e.section_id
+      LEFT JOIN section_exits p ON p.connection_id=e.connection_id AND p.id<>e.id
+      LEFT JOIN sections ds ON ds.id=p.section_id WHERE s.floor_id=? ORDER BY e.name,e.id`).all(floor.id)
+      .map(exit => ({ ...exit, x: exit.x - minX, z: exit.z - minZ }));
+    return { ...floor, renderOptions, coordinateOrigin: { x: minX, z: minZ }, dimensions: { x: Math.max(1, maxX - minX), y: maxY, z: Math.max(1, maxZ - minZ) }, blocks, sections, markers, connections, exits, markerTypes };
   }) };
 }
 
 export function defaultSectionRenderSettings() {
-  return { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1 };
+  return { cutaways: [], excludedBlocks: [], pixelSize: 16, heightShadePerBlock: 0.018, heightShadeMinY: null, heightShadeMaxY: null, heightShadeMultiplier: 1, surfaceShadeMultiplier: 0 };
 }
 
 function validateSectionRenderSettings(input) {
@@ -611,6 +708,8 @@ function validateSectionRenderSettings(input) {
   const pixelSize = input.pixelSize ?? 16, heightShadePerBlock = input.heightShadePerBlock ?? 0.018;
   const heightShadeMinY = input.heightShadeMinY ?? null, heightShadeMaxY = input.heightShadeMaxY ?? null;
   const heightShadeMultiplier = input.heightShadeMultiplier ?? 1;
+  const surfaceShadeMultiplier = input.surfaceShadeMultiplier ?? 0;
+  if (typeof surfaceShadeMultiplier !== 'number' || !Number.isFinite(surfaceShadeMultiplier) || surfaceShadeMultiplier < 0 || surfaceShadeMultiplier > 10) throw new Error('Surface shading multiplier must be from 0 to 10.');
   if (!Number.isInteger(pixelSize) || pixelSize < 4 || pixelSize > 32) throw new Error('Pixel scale must be from 4 to 32 pixels per block.');
   if (typeof heightShadePerBlock !== 'number' || !Number.isFinite(heightShadePerBlock) || heightShadePerBlock < 0 || heightShadePerBlock > 0.05) throw new Error('Height shading must be from 0 to 0.05 per block.');
   if (heightShadeMinY !== null && (!Number.isSafeInteger(heightShadeMinY) || Math.abs(heightShadeMinY) > 1_000_000)) throw new Error('Minimum shading Y must be a whole block coordinate.');
@@ -623,7 +722,7 @@ function validateSectionRenderSettings(input) {
     if (box.x < -1000000 || box.y < -1000000 || box.z < -1000000 || box.width < 1 || box.height < 1 || box.depth < 1 || box.width > 1000000 || box.height > 1000000 || box.depth > 1000000) throw new Error('Cutaway boxes must have positive bounded dimensions.');
   }
   if (!Array.isArray(excludedBlocks) || excludedBlocks.length > 1000 || excludedBlocks.some(name => typeof name !== 'string' || !/^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(name))) throw new Error('Excluded blocks must be namespaced Minecraft block IDs.');
-  return { cutaways: cutaways.map(({ x,y,z,width,height,depth }) => ({ x,y,z,width,height,depth })), excludedBlocks: [...new Set(excludedBlocks)].sort(), pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, heightShadeMultiplier };
+  return { cutaways: cutaways.map(({ x,y,z,width,height,depth }) => ({ x,y,z,width,height,depth })), excludedBlocks: [...new Set(excludedBlocks)].sort(), pixelSize, heightShadePerBlock, heightShadeMinY, heightShadeMaxY, heightShadeMultiplier, surfaceShadeMultiplier };
 }
 
 export function saveSectionRenderSettings(db, sectionId, input, expectedRevision) {
@@ -635,7 +734,7 @@ export function saveSectionRenderSettings(db, sectionId, input, expectedRevision
   const before = { ...defaultSectionRenderSettings(), ...(current ? JSON.parse(current.settings_json) : {}), ...(renderOptionsRow ? JSON.parse(renderOptionsRow.value) : {}) };
   const tx = db.transaction(() => {
     db.prepare(`INSERT INTO section_render_settings(section_id,settings_json) VALUES(?,?) ON CONFLICT(section_id) DO UPDATE SET settings_json=excluded.settings_json`).run(sectionId, JSON.stringify({ cutaways: settings.cutaways, excludedBlocks: settings.excludedBlocks }));
-    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: settings.pixelSize, heightShadePerBlock: settings.heightShadePerBlock, heightShadeMinY: settings.heightShadeMinY, heightShadeMaxY: settings.heightShadeMaxY, heightShadeMultiplier: settings.heightShadeMultiplier }));
+    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: settings.pixelSize, heightShadePerBlock: settings.heightShadePerBlock, heightShadeMinY: settings.heightShadeMinY, heightShadeMaxY: settings.heightShadeMaxY, heightShadeMultiplier: settings.heightShadeMultiplier, surfaceShadeMultiplier: settings.surfaceShadeMultiplier }));
     advanceProjectRevision(db, expectedRevision);
   });
   tx();
@@ -651,7 +750,7 @@ export function restoreSectionRenderSettings(db, command, direction, expectedRev
   const tx = db.transaction(() => {
     const validated = validateSectionRenderSettings(target);
     db.prepare(`INSERT INTO section_render_settings(section_id,settings_json) VALUES(?,?) ON CONFLICT(section_id) DO UPDATE SET settings_json=excluded.settings_json`).run(command.sectionId, JSON.stringify({ cutaways: validated.cutaways, excludedBlocks: validated.excludedBlocks }));
-    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: validated.pixelSize, heightShadePerBlock: validated.heightShadePerBlock, heightShadeMinY: validated.heightShadeMinY, heightShadeMaxY: validated.heightShadeMaxY, heightShadeMultiplier: validated.heightShadeMultiplier }));
+    db.prepare("INSERT INTO project_meta(key,value) VALUES('render_options',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ pixelSize: validated.pixelSize, heightShadePerBlock: validated.heightShadePerBlock, heightShadeMinY: validated.heightShadeMinY, heightShadeMaxY: validated.heightShadeMaxY, heightShadeMultiplier: validated.heightShadeMultiplier, surfaceShadeMultiplier: validated.surfaceShadeMultiplier }));
     advanceProjectRevision(db, expectedRevision);
   });
   tx();
@@ -668,7 +767,7 @@ export function seedInitialProject(db, fixturePath) {
   const chunks = encodeSectionChunks(region.blocks, region.blockEntities);
   const tx = db.transaction(() => {
     db.prepare('INSERT INTO floors(id,name,sort_order) VALUES(?,?,?)').run('floor-0', 'Floor 0', 0);
-    db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run(
+    db.prepare("INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json,tracking_orientation_json) VALUES(?,?,?,?,?,?,?,'[1,0,0,1]')").run(
       'section-start-0f', 'floor-0', 'Starting Area', JSON.stringify(region.dimensions), 0, 0,
       JSON.stringify({ sourceName: 'Start 0F.litematic', litematicVersion: schematic.version, subVersion: schematic.subVersion, dataVersion: schematic.dataVersion })
     );
@@ -940,6 +1039,7 @@ function sectionTransformState(db, sectionId) {
     section,
     chunks: db.prepare('SELECT chunk_x,chunk_y,chunk_z,format_version,blob FROM section_chunks WHERE section_id=?').all(sectionId),
     markers: db.prepare('SELECT id,x,z FROM markers WHERE section_id=?').all(sectionId),
+    exits: db.prepare('SELECT id,x,z FROM section_exits WHERE section_id=?').all(sectionId),
     connections: db.prepare('SELECT id,section_a_id,x_a,z_a,section_b_id,x_b,z_b FROM section_connections WHERE section_a_id=? OR section_b_id=?').all(sectionId, sectionId)
   };
 }
@@ -1004,8 +1104,18 @@ function applySectionTransform(db, sectionId, operation, inverse = false) {
   const point = (x,z,cell=false) => transformedPoint(x,z,bounds.x,bounds.z,operation,cell,inverse);
   const blocks = readSectionBlocks(db, sectionId).map(block => ({ ...block, ...point(block.x,block.z,true), properties: transformBlockProperties(block.properties,operation,inverse) }));
   const entities = state.chunks.flatMap(chunk => decodeChunkBlob(chunk.blob).blockEntities ?? []).map(entity => ({ ...entity, ...point(entity.x,entity.z,true) }));
+  const exits = state.exits.map(exit => ({ ...exit, ...point(exit.x,exit.z) }));
   const markers = state.markers.map(marker => ({ ...marker, ...point(marker.x,marker.z) }));
   const label = point(state.section.label_x,state.section.label_z);
+  const tracking = db.prepare('SELECT calibration_json,tracking_orientation_json FROM sections WHERE id=?').get(sectionId);
+  const orientation = tracking.tracking_orientation_json ? JSON.parse(tracking.tracking_orientation_json) : DEFAULT_TRACKING_ORIENTATION;
+  const origin = point(0, 0), xAxis = point(1, 0), zAxis = point(0, 1);
+  const a = xAxis.x - origin.x, b = zAxis.x - origin.x, c = xAxis.z - origin.z, d = zAxis.z - origin.z;
+  const [oa, ob, oc, od] = orientation;
+  const nextOrientation = [a * oa + b * oc, a * ob + b * od, c * oa + d * oc, c * ob + d * od];
+  let calibration = tracking.calibration_json ? JSON.parse(tracking.calibration_json) : null;
+  if (calibration) calibration = { ...calibration, local: { ...calibration.local, ...point(calibration.local.x, calibration.local.z, true) } };
+  db.prepare('UPDATE sections SET tracking_orientation_json=?,calibration_json=? WHERE id=?').run(JSON.stringify(nextOrientation), calibration ? JSON.stringify(calibration) : null, sectionId);
   const connections = state.connections.map(connection => {
     const next = { ...connection };
     if (connection.section_a_id === sectionId) Object.assign(next, Object.fromEntries(Object.entries(point(connection.x_a,connection.z_a)).map(([axis,value]) => [`${axis}_a`,value])));
@@ -1020,6 +1130,7 @@ function applySectionTransform(db, sectionId, operation, inverse = false) {
   db.prepare('UPDATE sections SET bounds_json=?,label_x=?,label_z=? WHERE id=?').run(JSON.stringify(bounds),label.x,label.z,sectionId);
   const updateMarker = db.prepare('UPDATE markers SET x=?,z=? WHERE id=?');
   for (const marker of markers) updateMarker.run(marker.x,marker.z,marker.id);
+  for (const exit of exits) db.prepare('UPDATE section_exits SET x=?,z=? WHERE id=?').run(exit.x, exit.z, exit.id);
   const updateConnection = db.prepare('UPDATE section_connections SET x_a=?,z_a=?,x_b=?,z_b=? WHERE id=?');
   for (const connection of connections) updateConnection.run(connection.x_a,connection.z_a,connection.x_b,connection.z_b,connection.id);
   validateSectionLayout(db, sectionId, db.prepare('SELECT placement_x FROM sections WHERE id=?').get(sectionId).placement_x, db.prepare('SELECT placement_z FROM sections WHERE id=?').get(sectionId).placement_z);
@@ -1045,7 +1156,8 @@ export function restoreSectionTransform(db, command, direction, expectedRevision
 }
 
 /** Persist one decoded schematic as an independent section in a shared schematic coordinate frame. */
-export function importSchematicSection(db, schematic, { floorId = null, floorName = 'Floor 0', sectionName = 'Imported section' } = {}) {
+export function importSchematicSection(db, schematic, { floorId = null, floorName = 'Floor 0', sectionName = 'Imported section', position = null } = {}) {
+  if (position !== null && position !== 'middle' && !sectionDirections.includes(position)) throw new Error('Choose a valid import position.');
   if (!Array.isArray(schematic?.regions) || !schematic.regions.length) throw new Error('Litematic contains no regions to import');
   if (typeof sectionName !== 'string' || !sectionName.trim() || sectionName.length > 120) throw new Error('Section name must contain 1–120 characters');
   if (typeof floorName !== 'string' || !floorName.trim() || floorName.length > 120) throw new Error('Floor name must contain 1–120 characters');
@@ -1082,16 +1194,27 @@ export function importSchematicSection(db, schematic, { floorId = null, floorNam
   const creatingFloor = !floorId;
   const targetFloorId = floorId ?? randomUUID();
   if (floorId && !db.prepare('SELECT 1 FROM floors WHERE id=?').get(floorId)) throw new Error('Selected floor does not exist');
+  const existingFloor = floorId ? snapshotProject(db).floors.find(floor => floor.id === floorId) : null;
+  const existingSections = existingFloor?.sections ?? [];
+  let placement = { placementX: 0, placementZ: 0 };
+  if (existingSections.length) {
+    if (position === 'middle') throw new Error('This floor already has a middle section. Choose a surrounding position.');
+    const candidate = { id: sectionId, name: sectionName, bounds: dimensions, placementX: 0, placementZ: 0 };
+    placement = sectionPlacement([...existingSections, candidate], sectionId, position ?? 'right', existingFloor.coordinateOrigin);
+  } else if (position && position !== 'middle') throw new Error('The first section on a floor must be Middle.');
   const chunks = encodeSectionChunks(blocks, entities);
   const tx = db.transaction(() => {
     if (creatingFloor) {
       const order = db.prepare('SELECT COALESCE(MAX(sort_order), -1)+1 AS next FROM floors').get().next;
       db.prepare('INSERT INTO floors(id,name,sort_order) VALUES(?,?,?)').run(targetFloorId, floorName.trim(), order);
     }
-    db.prepare('INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json) VALUES(?,?,?,?,?,?,?)').run(
-      sectionId, targetFloorId, sectionName.trim(), JSON.stringify(dimensions), 0, 0,
+    db.prepare("INSERT INTO sections(id,floor_id,name,bounds_json,placement_x,placement_z,provenance_json,tracking_orientation_json) VALUES(?,?,?,?,?,?,?,'[1,0,0,1]')").run(
+      sectionId, targetFloorId, sectionName.trim(), JSON.stringify(dimensions), placement.placementX, placement.placementZ,
       JSON.stringify({ litematicVersion: schematic.version, subVersion: schematic.subVersion, dataVersion: schematic.dataVersion, regionNames: schematic.regions.map(region => region.name) })
     );
+    // Append after the current middle; UUID ordering must never choose a new middle.
+    const nextOrder = db.prepare('SELECT COALESCE(MAX(sort_order),-1)+1 AS next FROM sections WHERE floor_id=? AND id<>?').get(targetFloorId, sectionId).next;
+    db.prepare('UPDATE sections SET sort_order=? WHERE id=?').run(nextOrder, sectionId);
     const insert = db.prepare('INSERT INTO section_chunks(section_id,chunk_x,chunk_y,chunk_z,format_version,blob) VALUES(?,?,?,?,?,?)');
     for (const chunk of chunks) insert.run(sectionId, chunk.cx, chunk.cy, chunk.cz, 1, chunk.compressed);
     db.prepare("INSERT OR REPLACE INTO project_meta(key,value) VALUES('schema_version','1'),('coordinate_contract','section-local x,y,z; chunks 16^3; index=(y*16+z)*16+x')").run();

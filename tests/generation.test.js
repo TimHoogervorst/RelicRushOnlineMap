@@ -37,7 +37,7 @@ test('publishes image, manifest, and project snapshot through one revision point
     const manifest = await generation.currentManifest('f1');
     assert.equal(manifest.projectRevision, 4);
     const fullManifest = JSON.parse(await readFile(path.join(dataDir, 'releases', 'revision-4', 'manifest.json')));
-    assert.equal(fullManifest.generatorVersion, '1');
+    assert.equal(fullManifest.generatorVersion, '12');
     assert.match(fullManifest.projectHash, /^[a-f0-9]{64}$/);
     assert.match(fullManifest.assetHash, /^[a-f0-9]{64}$/);
     assert.match(fullManifest.renderSettingsHash, /^[a-f0-9]{64}$/);

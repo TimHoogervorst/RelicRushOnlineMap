@@ -3,8 +3,9 @@ import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/
 import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
+import { upgradeCalibration } from './tracking-coordinates.js';
 
-const GENERATOR_VERSION = '9';
+const GENERATOR_VERSION = '12';
 const DEFAULT_HIDDEN_BLOCKS = new Set(['minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:decorated_pot', 'minecraft:player_head']);
 
 function canonicalJson(value) {
@@ -93,9 +94,9 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
             if (DEFAULT_HIDDEN_BLOCKS.has(block.id) || (settings.excludedBlocks ?? []).includes(block.id)) return false;
             const x = block.localX ?? block.x, y = block.localY ?? block.y, z = block.localZ ?? block.z;
             return !(settings.cutaways ?? []).some(box => x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height && z >= box.z && z < box.z + box.depth);
-          }).map(({ sectionId, localX, localY, localZ, ...block }) => block);
+          }).map(({ localX, localY, localZ, ...block }) => block);
           const settings = floor.renderOptions ?? floor.sections?.[0]?.renderSettings ?? {};
-          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, heightShadeMinY: settings.heightShadeMinY ?? null, heightShadeMaxY: settings.heightShadeMaxY ?? null, heightShadeMultiplier: settings.heightShadeMultiplier ?? 1, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] });
+          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, heightShadeMinY: settings.heightShadeMinY ?? null, heightShadeMaxY: settings.heightShadeMaxY ?? null, heightShadeMultiplier: settings.heightShadeMultiplier ?? 1, surfaceShadeMultiplier: settings.surfaceShadeMultiplier ?? 0, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] });
           const outputPath = path.join(temporary, output);
           const [info, signature] = await Promise.all([stat(outputPath), readFile(outputPath).then(bytes => bytes.subarray(0, 8))]);
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
@@ -107,7 +108,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
             throw new Error(`Renderer produced an invalid height grid for floor ${floor.name}.`);
           }
           await writeFile(path.join(temporary, heightGridPath), JSON.stringify({ format: 'rr-map-surface-height-grid', version: 1, projectRevision: snapshot.revision, floorId: floor.id, coordinateOrigin: floor.coordinateOrigin, xAxis: 'east', zAxis: 'south', rowOrder: 'z-ascending', values: heightGrid.values }));
-          floors.push({ id: floor.id, name: floor.name, image: output, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision }, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [], ...rendered, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision } });
+          floors.push({ id: floor.id, name: floor.name, image: output, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision }, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], exits: floor.exits ?? [], connections: floor.connections ?? [], ...rendered, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision } });
         }
         progress('Writing revision snapshot', 90);
         let resourcePack = null;
@@ -138,7 +139,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
       if (pointer.revision >= snapshot.revision) throw new Error('Stale revision; reload and retry your edit.');
       const previousDir = path.join(releasesDir, pointer.directory);
       const previousProject = JSON.parse(await readFile(path.join(previousDir, 'project.json'), 'utf8'));
-      const geometry = value => (value.floors ?? []).map(({ id, dimensions, blocks, sections }) => ({ id, dimensions, blocks, sections }));
+      const geometry = value => (value.floors ?? []).map(({ id, dimensions, blocks, sections }) => ({ id, dimensions, blocks, sections: sections?.map(({ calibration: _calibration, trackingOrientation: _orientation, ...geometry }) => geometry) }));
       if (JSON.stringify(geometry(previousProject)) !== JSON.stringify(geometry(snapshot))) throw new Error('Geometry has not been saved yet. Save the complete project before marker changes.');
       const previousManifest = JSON.parse(await readFile(path.join(previousDir, 'manifest.json'), 'utf8'));
       const tempName = `.building-${snapshot.revision}-${randomUUID()}`;
@@ -152,7 +153,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           if (!floor) throw new Error('Metadata-only save cannot change the floor list.');
           await copyFile(path.join(previousDir, oldFloor.image), path.join(temporary, oldFloor.image));
           if (oldFloor.heightGrid?.path) await copyFile(path.join(previousDir, oldFloor.heightGrid.path), path.join(temporary, oldFloor.heightGrid.path));
-          floors.push({ ...oldFloor, name: floor.name, sortOrder: floor.sortOrder, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], connections: floor.connections ?? [] });
+          floors.push({ ...oldFloor, name: floor.name, sortOrder: floor.sortOrder, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], exits: floor.exits ?? [], connections: floor.connections ?? [] });
         }
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
         progress('Writing metadata revision', 90);
@@ -175,6 +176,16 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
     if (!/^revision-[0-9]+$/.test(pointer.directory) || Number(pointer.directory.slice(9)) !== pointer.revision) throw new Error('Invalid saved revision pointer');
     const manifest = JSON.parse(await readFile(path.join(releasesDir, pointer.directory, 'manifest.json'), 'utf8'));
     if (manifest.projectRevision !== pointer.revision) throw new Error('Saved map revision is inconsistent');
+    // Read old releases correctly even when assets are unavailable for regeneration.
+    if (manifest.floors.some(floor => floor.sections?.some(section => section.calibration && section.calibration.coordinateVersion !== 2))) {
+      const saved = JSON.parse(await readFile(path.join(releasesDir, pointer.directory, 'project.json'), 'utf8'));
+      const blocks = new Map();
+      for (const floor of saved.floors) for (const block of floor.blocks ?? []) {
+        if (!blocks.has(block.sectionId)) blocks.set(block.sectionId, []);
+        blocks.get(block.sectionId).push({ x: block.localX ?? block.x, y: block.localY ?? block.y, z: block.localZ ?? block.z });
+      }
+      for (const floor of manifest.floors) for (const section of floor.sections ?? []) section.calibration = upgradeCalibration(section.calibration, blocks.get(section.id) ?? []);
+    }
     if (floorId) {
       const floor = manifest.floors.find(item => item.id === floorId);
       if (!floor) throw new Error('Floor does not exist in the saved map.');
