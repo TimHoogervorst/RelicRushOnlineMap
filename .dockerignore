@@ -1,0 +1,10 @@
+.git
+.worktrees
+node_modules
+npm-debug.log
+data
+.env
+assets/*.jar
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
