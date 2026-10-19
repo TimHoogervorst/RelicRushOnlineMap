@@ -4,8 +4,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { SaveQueue } from './save-queue.js';
 import { upgradeCalibration } from './tracking-coordinates.js';
+import { detailPixelSize } from './detail-resolution.js';
 
-const GENERATOR_VERSION = '12';
+const GENERATOR_VERSION = '13';
 const DEFAULT_HIDDEN_BLOCKS = new Set(['minecraft:short_grass', 'minecraft:tall_grass', 'minecraft:decorated_pot', 'minecraft:player_head']);
 
 function canonicalJson(value) {
@@ -96,11 +97,22 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
             return !(settings.cutaways ?? []).some(box => x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height && z >= box.z && z < box.z + box.depth);
           }).map(({ localX, localY, localZ, ...block }) => block);
           const settings = floor.renderOptions ?? floor.sections?.[0]?.renderSettings ?? {};
-          const rendered = await renderer.render({ schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, heightShadeMinY: settings.heightShadeMinY ?? null, heightShadeMaxY: settings.heightShadeMaxY ?? null, heightShadeMultiplier: settings.heightShadeMultiplier ?? 1, surfaceShadeMultiplier: settings.surfaceShadeMultiplier ?? 0, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] });
+          const renderInput = { schematic: { dimensions: floor.dimensions, blocks }, assets: assetsDir, output: path.join(temporary, output), pixelSize: settings.pixelSize ?? 16, heightShadePerBlock: settings.heightShadePerBlock ?? 0.018, heightShadeMinY: settings.heightShadeMinY ?? null, heightShadeMaxY: settings.heightShadeMaxY ?? null, heightShadeMultiplier: settings.heightShadeMultiplier ?? 1, surfaceShadeMultiplier: settings.surfaceShadeMultiplier ?? 0, assetOverrides: assetsDir ? [path.join(path.dirname(assetsDir), 'resource-pack')] : [] };
+          const rendered = await renderer.render(renderInput);
           const outputPath = path.join(temporary, output);
           const [info, signature] = await Promise.all([stat(outputPath), readFile(outputPath).then(bytes => bytes.subarray(0, 8))]);
           if (info.size < 24 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || !Number.isSafeInteger(rendered?.width) || rendered.width < 1 || !Number.isSafeInteger(rendered?.height) || rendered.height < 1) {
             throw new Error(`Renderer produced invalid PNG output for floor ${floor.name}.`);
+          }
+          let detailImage = null;
+          const detailScale = detailPixelSize(floor.dimensions, renderInput.pixelSize);
+          if (detailScale) {
+            progress(`Rendering close-up detail for ${floor.name}`, Math.floor(index / Math.max(1, snapshot.floors.length) * 85));
+            const detailName = `${floor.id}-detail.png`, detailPath = path.join(temporary, detailName);
+            const detail = await renderer.render({ ...renderInput, output: detailPath, pixelSize: detailScale });
+            const bytes = await readFile(detailPath);
+            if (bytes.length < 24 || !bytes.subarray(0, 8).equals(signature) || !Number.isSafeInteger(detail?.width) || detail.width < 1 || !Number.isSafeInteger(detail?.height) || detail.height < 1) throw new Error(`Renderer produced invalid detail PNG output for floor ${floor.name}.`);
+            detailImage = { image: detailName, pixelSize: detailScale, width: detail.width, height: detail.height };
           }
           const heightGridPath = `${floor.id}-height-grid.json`;
           const heightGrid = rendered.heightGrid ?? { width: floor.dimensions.x, depth: floor.dimensions.z, values: Array.from({ length: floor.dimensions.z }, () => Array(floor.dimensions.x).fill(null)) };
@@ -108,7 +120,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
             throw new Error(`Renderer produced an invalid height grid for floor ${floor.name}.`);
           }
           await writeFile(path.join(temporary, heightGridPath), JSON.stringify({ format: 'rr-map-surface-height-grid', version: 1, projectRevision: snapshot.revision, floorId: floor.id, coordinateOrigin: floor.coordinateOrigin, xAxis: 'east', zAxis: 'south', rowOrder: 'z-ascending', values: heightGrid.values }));
-          floors.push({ id: floor.id, name: floor.name, image: output, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision }, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], exits: floor.exits ?? [], connections: floor.connections ?? [], ...rendered, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision } });
+          floors.push({ id: floor.id, name: floor.name, image: output, detailImage, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision }, coordinateOrigin: floor.coordinateOrigin, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], exits: floor.exits ?? [], connections: floor.connections ?? [], ...rendered, heightGrid: { path: heightGridPath, width: heightGrid.width, depth: heightGrid.depth, projectRevision: snapshot.revision } });
         }
         progress('Writing revision snapshot', 90);
         let resourcePack = null;
@@ -152,6 +164,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
           const floor = snapshot.floors.find(item => item.id === oldFloor.id);
           if (!floor) throw new Error('Metadata-only save cannot change the floor list.');
           await copyFile(path.join(previousDir, oldFloor.image), path.join(temporary, oldFloor.image));
+          if (oldFloor.detailImage?.image) await copyFile(path.join(previousDir, oldFloor.detailImage.image), path.join(temporary, oldFloor.detailImage.image));
           if (oldFloor.heightGrid?.path) await copyFile(path.join(previousDir, oldFloor.heightGrid.path), path.join(temporary, oldFloor.heightGrid.path));
           floors.push({ ...oldFloor, name: floor.name, sortOrder: floor.sortOrder, sections: floor.sections, markers: floor.markers ?? [], markerTypes: floor.markerTypes ?? [], exits: floor.exits ?? [], connections: floor.connections ?? [] });
         }

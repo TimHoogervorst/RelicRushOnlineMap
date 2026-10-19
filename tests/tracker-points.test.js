@@ -10,6 +10,8 @@ import { saveCalibration, locatePlayers, trackingSections } from '../src/player-
 import { editTrackerPoints, activeTrackerPoints, trackerOverlaps } from '../src/tracker-points.js';
 import { createApp } from '../src/server.js';
 import { createProjectBackup, restoreProjectBackup } from '../src/backup-service.js';
+import { recordObservation, runDetail } from '../src/dungeon-runs.js';
+import { replayTrackerSample } from '../public/run-playback.js';
 
 const player = { uuid: 'a'.repeat(32), name: 'Explorer', world: 'world', x: 100.25, y: 65.25, z: 200.75 };
 function seed(db) {
@@ -19,6 +21,26 @@ function seed(db) {
   saveCalibration(db, 's', { world: 'world', local: { x: 1, y: 0, z: 2 }, actual: { x: 100, y: 64, z: 200 }, region: { min: { x: 90, y: 60, z: 190 }, max: { x: 91, y: 61, z: 191 } } }, 0);
 }
 function sections(db) { return trackingSections(snapshotProject(db)); }
+
+test('replay tracker correction changes future assignment without modifying the recorded run', () => {
+  const db = openProject(':memory:');
+  try {
+    seed(db);
+    const manifest = snapshotProject(db);
+    const observation = { ...player, status: 'mapped', floorId: 'f', sectionId: 'incorrect', local: { x: 50, y: 1, z: 50 } };
+    const run = recordObservation(db, { updatedAt: 1000, players: [observation], stale: false }, manifest, 1000);
+    recordObservation(db, { updatedAt: 2000, players: [{ ...observation, status: 'outside' }], stale: false }, manifest, 2000);
+    const before = runDetail(db, run.id);
+    const stored = db.prepare('SELECT state FROM dungeon_runs WHERE id=?').get(run.id).state;
+    const captured = replayTrackerSample(before, player.uuid, 1000);
+    assert.equal(captured.x, player.x);
+    assert.equal(locatePlayers([player], sections(db)).located[0].status, 'outside');
+    editTrackerPoints(db, { sectionId: 's', position: captured, name: 'Replay correction' }, projectRevision(db));
+    assert.equal(locatePlayers([player], sections(db)).located[0].sectionId, 's');
+    assert.deepEqual(runDetail(db, run.id), before);
+    assert.equal(db.prepare('SELECT state FROM dungeon_runs WHERE id=?').get(run.id).state, stored);
+  } finally { db.close(); }
+});
 test('tracker override respects cylindrical reach, worlds, nearest distance and ties before floor selection', () => {
   const db = openProject(':memory:');
   try {
@@ -101,7 +123,7 @@ test('tracker API publishes without rendering, protects writes, supports history
   assert.equal((await fetch(`${origin}/api/players`).then(r => r.json())).players.length, 0);
   await edit({ direction: 'redo', expectedRevision: 3 });
   await edit({ settings: { horizontal: 4, vertical: 0.5 }, expectedRevision: 4 });
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   const diagnostics = await fetch(`${origin}/api/project/tracking`, { headers }).then(r => r.json());
   assert.deepEqual(diagnostics.trackingSettings, { horizontal: 4, vertical: 0.5 });
   const backup = await createProjectBackup({ dataDir });

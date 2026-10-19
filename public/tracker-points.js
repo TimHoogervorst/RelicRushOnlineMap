@@ -41,13 +41,13 @@ export function mountTrackerPoints(hooks, editor, panel, refresh) {
     $(`#tracker-${axis}`).addEventListener('change', () => { void save({ settings: { horizontal: Number($('#tracker-horizontal').value), vertical: Number($('#tracker-vertical').value) } }); });
   }
   for (const b of controls.querySelectorAll('[data-history]')) b.addEventListener('click', () => { void save({ direction: b.dataset.history }); });
-  function capture(player, replacement = null) {
-    if (!data || data.stale || Date.now() - data.receivedAt > 6000) { $('.tracker-status').textContent = 'Wait for fresh player positions before capturing.'; return; }
+  function capture(player, replacement = null, replay = false) {
+    if (!data || (!replay && (data.stale || Date.now() - data.receivedAt > 6000))) { $('.tracker-status').textContent = 'Wait for fresh player positions before capturing.'; return; }
     const options = trackerSectionOptions(data.sections, player.world, replacement?.sectionId);
     const eligible = options.filter(s => !s.reason);
     captured = { position: { world: player.world, x: player.x, y: player.y, z: player.z }, revision: data.revision, id: replacement?.id };
     const form = $('.tracker-capture'); form.hidden = false;
-    form.querySelector('p').textContent = `${player.name} · ${player.world} · X ${player.x}, Y ${player.y}, Z ${player.z} (captured now)`;
+    form.querySelector('p').textContent = `${player.name} · ${player.world} · X ${player.x}, Y ${player.y}, Z ${player.z} ${replay ? `(recorded ${new Date(player.time).toLocaleString()}). Applies to future tracking; this run stays unchanged.` : '(captured now)'}`;
     form.querySelector('select').replaceChildren(...options.map(s => {
       const option = new Option(s.label, s.id); option.disabled = Boolean(s.reason); return option;
     }));
@@ -130,5 +130,10 @@ export function mountTrackerPoints(hooks, editor, panel, refresh) {
     for (const b of online.querySelectorAll('button')) if (b.textContent === 'Add tracker') b.disabled = true;
     onlineKey = '';
   }
-  return { update, draw, unavailable };
+  return { update, draw, unavailable, async captureReplay(player) {
+    if (!hooks.state().editing) return;
+    const sample = structuredClone(player);
+    await refresh();
+    if (hooks.state().editing) capture(sample, null, true);
+  } };
 }

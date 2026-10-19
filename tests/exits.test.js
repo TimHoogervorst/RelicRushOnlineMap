@@ -90,5 +90,5 @@ test('exit API requires auth and publishes standalone exits and reciprocal desti
   map = await fetch(`${origin}/api/map/manifest`).then(r => r.json());
   assert.equal(map.floors[0].exits[0].destinationId, null);
   assert.equal(map.floors[1].exits.length, 1);
-  assert.equal(renders, 2);
+  assert.equal(renders, 4);
 });

@@ -1,5 +1,5 @@
 import { mountRunStartpoint } from './run-startpoint.js';
-import { durationLabel, indexRecording, replayPosition, routeSegments, routeAnnotations } from './run-playback.js';
+import { durationLabel, indexRecording, replayPosition, replayTrackerSample, routeSegments, routeAnnotations } from './run-playback.js';
 
 const svgNS = 'http://www.w3.org/2000/svg';
 async function request(url, options = {}) {
@@ -27,6 +27,20 @@ export function mountDungeonRuns(hooks, panel) {
   panel.append(area);
   const startpointEditor = mountRunStartpoint(hooks);
   const $ = selector => area.querySelector(selector);
+  const capture = button('Add tracker point', async () => {
+    if (!hooks.state().editing || playing || capturing) return;
+    const sample = replayTrackerSample(recording, $('.run-follow').value, recording?.startedAt + elapsed);
+    if (!sample) return;
+    // Snap to the exact recorded observation being captured.
+    elapsed = sample.time - recording.startedAt;
+    capturing = true; capture.disabled = true;
+    try { await hooks.captureReplay(sample); captureStatus.textContent = 'Choose the correct section in Player tracking. This recording stays unchanged.'; }
+    catch (error) { captureStatus.textContent = error.message; }
+    finally { capturing = false; captureKey = ''; }
+  });
+  capture.className = 'run-capture'; capture.disabled = true; capture.hidden = true;
+  const captureStatus = document.createElement('p'); captureStatus.className = 'run-capture-status'; captureStatus.setAttribute('role', 'status'); captureStatus.hidden = true;
+  $('.run-exit').before(capture, captureStatus);
   $('.run-timezone').textContent = `Times in ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
   const overlay = document.createElementNS(svgNS, 'svg'); overlay.id = 'run-routes'; overlay.setAttribute('aria-hidden', 'true');
   const heads = document.createElement('div'); heads.id = 'run-heads';
@@ -45,6 +59,18 @@ export function mountDungeonRuns(hooks, panel) {
   let endpoint = null, draft = null, recording = null, tracks = new Map(), map = null, elapsed = 0, playing = false, lastFrame = null, drawingKey = '', navigating = false, missingSections = false;
   let queryVersion = 0, cursor = null, results = [], filters = {}, wasEditing = false, historyKey, opening = 0, refreshingMap = false;
   let searchTimer;
+  let capturing = false, captureKey = '';
+  function updateCapture() {
+    const editing = hooks.state().editing;
+    capture.hidden = captureStatus.hidden = !editing;
+    const uuid = $('.run-follow').value;
+    const key = `${recording?.id}:${elapsed}:${uuid}:${editing}:${playing}:${capturing}`;
+    if (key === captureKey) return;
+    captureKey = key;
+    const sample = editing && !playing && !capturing && replayTrackerSample(recording, uuid, recording?.startedAt + elapsed);
+    capture.disabled = !sample;
+    capture.title = !uuid ? 'Follow a replay player first.' : playing ? 'Pause the replay to capture a position.' : !sample ? 'No recorded position here (for example, during invisibility).' : 'Save a tracker point from this recorded position for future tracking.';
+  }
   let timer, disposed = false, endpointDirty = false; const played = new Set(), seenLive = new Set();
   const report = error => { $('.run-status').textContent = error.message; };
   function renderEndpointForm(value) {
@@ -145,6 +171,7 @@ export function mountDungeonRuns(hooks, panel) {
       const [data, manifest] = await Promise.all([request(`/api/runs/${encodeURIComponent(id)}`), request('/api/map/manifest')]);
       if (token !== opening) return;
       recording = data; map = manifest; tracks = indexRecording(data, map); elapsed = 0; playing = false; played.clear(); drawingKey = ''; hooks.stopLive();
+      captureStatus.textContent = ''; captureKey = '';
       const sectionIds = new Set(map.floors.flatMap(f => f.sections.map(s => s.id)));
       missingSections = data.samples.some(s => !sectionIds.has(s.sectionId));
       $('.run-replay').hidden = false; document.querySelector('#map-frame').classList.add('replaying');
@@ -167,6 +194,7 @@ export function mountDungeonRuns(hooks, panel) {
     if (node && !node.hidden) node.animate([{ scale: '1' }, { scale: '1.5', filter: 'brightness(1.6)' }, { scale: '1' }], { duration: 650 });
   }
   function draw(time) {
+    updateCapture();
     const state = hooks.state(), floor = state.floor, dt = lastFrame === null ? 0 : Math.min(1000, time - lastFrame); lastFrame = time;
     editor.hidden = !state.editing; place.hidden = !state.editing;
     if (state.editing !== wasEditing) { wasEditing = state.editing; renderResults(); }
@@ -202,7 +230,7 @@ export function mountDungeonRuns(hooks, panel) {
         for (const segment of routeSegments(samples, new Set(sections.keys()))) {
           const line = document.createElementNS(svgNS, 'polyline'); line.setAttribute('points', segment.map(s => { const p = display(s); return `${p.x * pixels},${(floor.bounds.depth - p.z) * pixels}`; }).join(' '));
           line.setAttribute('vector-effect', 'non-scaling-stroke');
-          if (index === 1) { line.classList.add('run-player-two'); line.setAttribute('stroke-dasharray', '7 5'); }
+          if (index === 1) line.classList.add('run-player-two');
           const glow = line.cloneNode(); glow.classList.add('run-route-glow');
           const outline = line.cloneNode(); outline.classList.add('run-route-outline');
           line.classList.add('run-route-line'); overlay.append(glow, outline, line);
@@ -225,12 +253,15 @@ export function mountDungeonRuns(hooks, panel) {
           const canNavigate = destination && !destination.unavailable && destination.floorId !== floor.id;
           const node = document.createElement(canNavigate ? 'button' : 'div'); node.className = `run-annotation run-${annotation.kind}-marker`; node.title = label; node.setAttribute('aria-label', label);
           const icon = document.createElement('span'); icon.className = 'run-annotation-icon'; icon.textContent = invisible ? '?' : isExit ? '↗' : '×';
-          const text = document.createElement('span'); text.textContent = label; node.append(icon, text);
+          const text = document.createElement('span');
+          const destinationFloor = destination && map?.floors.find(f => f.id === destination.floorId);
+          const floorNumber = destinationFloor?.name?.match(/-?\d+/)?.[0] ?? destinationFloor?.sortOrder;
+          text.textContent = invisible ? (annotation.kind === 'invisibility-start' ? 'Invisible' : 'Visible') : isExit ? (floorNumber != null ? `Floor ${floorNumber}` : destination.floorName ?? 'Floor') : 'End';
+          node.append(icon, text);
           node.style.left = `${point.x * pixels}px`; node.style.top = `${(floor.bounds.depth - point.z) * pixels}px`;
           if (canNavigate) {
             node.type = 'button'; node.classList.add('run-annotation-link');
             const targetLabel = `${destination.floorName ?? destination.floorId} / ${destination.sectionName ?? destination.sectionId}`;
-            text.textContent += ` / Go to ${targetLabel}`;
             node.title = `${label} / Go to ${targetLabel}`; node.setAttribute('aria-label', node.title);
             node.addEventListener('pointerdown', event => event.stopPropagation());
             node.addEventListener('click', async event => {

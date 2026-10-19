@@ -37,7 +37,7 @@ test('publishes image, manifest, and project snapshot through one revision point
     const manifest = await generation.currentManifest('f1');
     assert.equal(manifest.projectRevision, 4);
     const fullManifest = JSON.parse(await readFile(path.join(dataDir, 'releases', 'revision-4', 'manifest.json')));
-    assert.equal(fullManifest.generatorVersion, '12');
+    assert.equal(fullManifest.generatorVersion, '13');
     assert.match(fullManifest.projectHash, /^[a-f0-9]{64}$/);
     assert.match(fullManifest.assetHash, /^[a-f0-9]{64}$/);
     assert.match(fullManifest.renderSettingsHash, /^[a-f0-9]{64}$/);
@@ -105,7 +105,8 @@ test('metadata-only release advances the public manifest without rerendering flo
     const firstImage = await readFile(path.join(dataDir, 'releases', 'revision-1', 'f1.png'));
     await generation.saveMetadata(snapshot(2, [{ id: 'm1', sectionId: 's1', type: 'chest', name: 'Chest A', x: 61.5, z: 34.5, localX: 61.5, localZ: 34.5 }]));
     const manifest = JSON.parse(await readFile(path.join(dataDir, 'releases', 'revision-2', 'manifest.json')));
-    assert.equal(renders, 1);
+    assert.equal(renders, 2, 'base and detail are rendered once, then reused by metadata saves');
+    assert.deepEqual(await readFile(path.join(dataDir, 'releases', 'revision-2', manifest.floors[0].detailImage.image)), await readFile(path.join(dataDir, 'releases', 'revision-1', before.floors[0].detailImage.image)));
     assert.equal(manifest.projectRevision, 2);
     assert.notEqual(manifest.projectHash, before.projectHash);
     assert.equal(manifest.renderSettingsHash, before.renderSettingsHash);

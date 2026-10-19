@@ -1,10 +1,12 @@
 import { markerScale } from './marker-sizing.js';
+import { mountMapDetail } from './map-detail.js';
 import { mountPlayerTracking } from './player-tracking.js';
 let playerUI = null;
 import { sectionPlacement, currentSectionDirection, sectionDirections } from './section-placement.js';
 const viewport = document.querySelector('#viewport');
 const frame = document.querySelector('#map-frame');
 const image = document.querySelector('#map');
+const mapDetail = mountMapDetail(image);
 const message = document.querySelector('#message');
 const sidebar = document.querySelector('#sidebar');
 const legendPanel = document.querySelector('#legend-panel');
@@ -48,7 +50,27 @@ exitSizeControl.addEventListener('input', () => {
   updateExitSizeLabel(); drawTransform();
   try { localStorage.setItem('rr-exit-minimum-size', String(exitMinimumSize)); } catch { /* Browser storage is optional. */ }
 });
-function drawTransform() { frame.style.setProperty('--exit-scale', String(markerScale(zoom, exitMinimumSize))); frame.style.setProperty('--marker-scale', String(markerScale(zoom, markerMinimumSize))); frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`; }
+function drawTransform() {
+  frame.style.setProperty('--exit-scale', String(markerScale(zoom, exitMinimumSize)));
+  frame.style.setProperty('--marker-scale', String(markerScale(zoom, markerMinimumSize)));
+  frame.style.setProperty('--screen-scale', String(1 / zoom));
+  frame.style.setProperty('--marker-radius', `${14 * zoom * markerScale(zoom, markerMinimumSize)}px`);
+  frame.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${zoom})`;
+  mapDetail.update(zoom, slicePreviewActive);
+  clampMapPopups();
+}
+
+function clampMapPopups() {
+  const bounds = viewport.getBoundingClientRect();
+  for (const popup of frame.querySelectorAll('#marker-popup, #cell-popup, #marker-tooltip')) {
+    if (popup.hidden) continue;
+    popup.style.setProperty('--popup-x', '0px'); popup.style.setProperty('--popup-y', '0px');
+    const rect = popup.getBoundingClientRect();
+    const dx = Math.max(bounds.left + 8 - rect.left, Math.min(0, bounds.right - 8 - rect.right));
+    const dy = Math.max(bounds.top + 8 - rect.top, Math.min(0, bounds.bottom - 8 - rect.bottom));
+    popup.style.setProperty('--popup-x', `${dx}px`); popup.style.setProperty('--popup-y', `${dy}px`);
+  }
+}
 function fitFloor() {
   if (!image.naturalWidth) return;
   let minX = 0, minY = 0, maxX = image.naturalWidth, maxY = image.naturalHeight;
@@ -215,6 +237,8 @@ async function loadFloor(floorId, { following = false } = {}) {
   if (!response.ok) throw new Error('The saved floor is unavailable.');
   floorManifest = await response.json();
   slicePreviewActive = false;
+  mapDetail.setFloor(floorManifest);
+  mapDetail.update(zoom, slicePreviewActive);
   if (editorAuthenticated) {
     const rangeResponse = await fetch(`/api/project/height-range?floor=${encodeURIComponent(floorId)}`);
     if (rangeResponse.ok) {
@@ -425,6 +449,7 @@ function updateSlicePreview() {
   clearTimeout(slicePreviewTimer);
   slicePreviewTimer = setTimeout(() => {
     slicePreviewActive = visibleHeight < sliceMaximum;
+    mapDetail.update(zoom, slicePreviewActive);
     image.src = slicePreviewActive
       ? `/api/project/preview?floor=${encodeURIComponent(floorManifest.id)}&maxY=${visibleHeight}&nonce=${Date.now()}`
       : `/api/map/image?revision=${encodeURIComponent(floorManifest.projectRevision)}&floor=${encodeURIComponent(floorManifest.id)}&v=${encodeURIComponent(floorManifest.imageVersion)}`;
@@ -540,10 +565,10 @@ async function inspectBlockAt(clientX, clientY, additive = false) {
     if (top) chooseBlock(top.id); else if (paletteChoice) renderBlockProperties();
     else document.querySelector('#block-selected-state').textContent = 'minecraft:air';
     const popup = document.querySelector('#cell-popup'), frameRect = frame.getBoundingClientRect();
-    popup.style.left = `${(clientX - frameRect.left) / zoom + 12}px`;
-    popup.style.top = `${(clientY - frameRect.top) / zoom + 12}px`;
+    popup.style.left = `${(clientX - frameRect.left) / zoom}px`;
+    popup.style.top = `${(clientY - frameRect.top) / zoom}px`;
     document.querySelector('#cell-coordinate').textContent = `${target.section.name} · ${x}, ${top?.y ?? 0}, ${z}`;
-    popup.hidden = false;
+    popup.hidden = false; clampMapPopups();
   } catch (error) { document.querySelector('#block-status').textContent = error.message; }
 }
 async function saveSelectedBlock(state = paletteChoice) {
@@ -657,16 +682,21 @@ function renderConnections() {
     const endpoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     endpoint.setAttribute('cx', String(x)); endpoint.setAttribute('cy', String(y)); endpoint.setAttribute('r', '14');
     endpoint.setAttribute('class', 'section-connection-endpoint'); target.append(endpoint);
-    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    label.setAttribute('x', String(x)); label.setAttribute('y', String(y - 22));
-    label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'section-connection-label');
-    label.textContent = exit.name; target.append(label);
+    if (!crossFloor) {
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', String(x)); label.setAttribute('y', String(y - 22));
+      label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'section-connection-label');
+      label.textContent = exit.name; target.append(label);
+    }
     if (crossFloor) {
       const to = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       to.setAttribute('x', String(x)); to.setAttribute('y', String(y + 31));
       to.setAttribute('text-anchor', 'middle'); to.setAttribute('class', 'section-connection-label');
       const floor = publicMap?.floors?.find(floor => floor.id === exit.destinationFloorId);
-      to.textContent = `To ? ${exit.destinationName} (${floor?.name ?? 'Other floor'})`;
+      to.textContent = `To ${floor?.name ?? 'Other floor'}`;
+      const description = `${exit.name} → ${exit.destinationName ?? 'Exit'} (${floor?.name ?? 'Other floor'})`;
+      target.setAttribute('aria-label', description);
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'title'); title.textContent = description; target.append(title);
       to.setAttribute('tabindex', '0'); to.setAttribute('role', 'link');
       to.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); void followExit(exit); });
       to.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); void followExit(exit); } });
@@ -738,7 +768,7 @@ function renderMarkers() {
       tooltip.replaceChildren();
       const strong = document.createElement('strong'); strong.textContent = marker.name;
       const kind = document.createElement('span'); kind.textContent = markerTitle(marker.type);
-      tooltip.append(strong, kind); tooltip.style.left = `${marker.x * pixels}px`; tooltip.style.top = `${markerScreenZ(marker) * pixels - 22}px`; tooltip.hidden = false;
+      tooltip.append(strong, kind); tooltip.style.left = `${marker.x * pixels}px`; tooltip.style.top = `${markerScreenZ(marker) * pixels}px`; tooltip.hidden = false; clampMapPopups();
     };
     button.addEventListener('pointerenter', showTooltip); button.addEventListener('pointerleave', () => { tooltip.hidden = true; });
     button.addEventListener('focus', showTooltip); button.addEventListener('blur', () => { tooltip.hidden = true; });
@@ -752,7 +782,7 @@ function renderMarkers() {
       document.querySelector('#popup-name').textContent = marker.name;
       const note = marker.type === 'stairs' && !marker.stairDestinationId ? 'Destination not yet mapped.' : '';
       document.querySelector('#popup-description').textContent = [marker.description, note].filter(Boolean).join('\n');
-      popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${markerScreenZ(marker) * pixels + 14}px`; popup.hidden = false;
+      popup.style.left = `${marker.x * pixels}px`; popup.style.top = `${markerScreenZ(marker) * pixels}px`; popup.hidden = false; clampMapPopups();
     });
     button.addEventListener('pointerdown', event => {
       if (!editorOpen) return;
@@ -971,7 +1001,7 @@ function showMarkerPopup(marker, note = '') {
   const pixels = floorManifest.renderer?.pixelSize ?? 16, popup = document.querySelector('#marker-popup');
   document.querySelector('#popup-name').textContent = marker.name;
   document.querySelector('#popup-description').textContent = [marker.description, note].filter(Boolean).join('\n');
-  popup.style.left = `${marker.x * pixels + 14}px`; popup.style.top = `${markerScreenZ(marker) * pixels + 14}px`; popup.hidden = false;
+  popup.style.left = `${marker.x * pixels}px`; popup.style.top = `${markerScreenZ(marker) * pixels}px`; popup.hidden = false; clampMapPopups();
 }
 function populateMarkerForm(marker = null) {
   document.querySelector('#marker-id').value = marker?.id ?? '';

@@ -3,6 +3,19 @@ export function durationLabel(milliseconds) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+// Capture an original observation, never interpolated map coordinates. Invisibility
+// intervals have no known position and must not create a tracking correction.
+export function replayTrackerSample(recording, uuid, time) {
+  if (!recording || !uuid || !Number.isFinite(time)) return null;
+  const participant = recording.participants.find(p => p.uuid === uuid);
+  if (!participant) return null;
+  const samples = recording.samples.filter(s => s.uuid === uuid);
+  if (!replayPosition(samples, time)) return null;
+  const sample = samples.findLast(s => s.time <= time);
+  if (!sample || typeof sample.world !== 'string' || !sample.world || !['x', 'y', 'z'].every(axis => Number.isFinite(sample[axis]))) return null;
+  return { ...sample, name: participant.name };
+}
+
 export function indexRecording(recording, manifest) {
   const sections = manifest && new Map(manifest.floors.flatMap(f => f.sections.map(s => [s.id, { ...s, floorId: f.id, floorName: f.name }])));
   return new Map(recording.participants.map(p => [p.uuid, recording.samples.filter(s => s.uuid === p.uuid).map(sample => {

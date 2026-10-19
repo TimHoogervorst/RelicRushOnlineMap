@@ -250,7 +250,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       const manifest = JSON.parse(await readFile(path.join(dataDir, 'releases', directory, 'manifest.json'), 'utf8'));
       if (manifest.projectRevision !== Number(revision)) throw new Error('Invalid release revision');
       const floor = manifest.floors?.find(item => item.id === _req.query.floor);
-      const imageName = floor?.image ?? manifest.image;
+      const imageName = _req.query.detail === '1' && floor?.detailImage ? floor.detailImage.image : floor?.image ?? manifest.image;
       if (path.basename(imageName) !== imageName) throw new Error('Invalid release manifest paths');
       res.set('Cache-Control', `public, max-age=31536000, immutable`).type('png').send(await readFile(path.join(dataDir, 'releases', directory, imageName)));
     } catch { res.status(503).type('text').send('The public map is not available until matching Minecraft assets are configured.'); }

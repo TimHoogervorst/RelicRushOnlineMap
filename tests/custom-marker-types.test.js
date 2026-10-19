@@ -31,7 +31,7 @@ test('custom marker types validate bundled fields, reassign atomically, undo/red
   assert.equal((await fetch(`${origin}/api/project/marker-types`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ expectedRevision: 1, type: { name: 'Unauthenticated', color: '#000000', icon: 'other' } }) })).status, 401);
   const baseline = await fetch(`${origin}/api/generation/save`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1 }) });
   assert.equal(baseline.status, 200, await baseline.clone().text());
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
 
   const invalid = await fetch(`${origin}/api/project/marker-types`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1, type: { name: 'Ruins', color: 'red', icon: '../secret.svg' } }) });
   assert.equal(invalid.status, 400);
@@ -39,7 +39,7 @@ test('custom marker types validate bundled fields, reassign atomically, undo/red
   assert.equal(created.status, 201, (await created.clone().json()).error);
   const { type } = await created.json();
   assert.match(type.id, /^custom_[0-9a-f-]{36}$/);
-  assert.equal(renders, 1, 'metadata-only type save must not rerender terrain');
+  assert.equal(renders, 2, 'metadata-only type save must not rerender terrain');
 
   const markerResponse = await fetch(`${origin}/api/project/markers`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 2, marker: { sectionId: 's1', type: type.id, name: 'Hidden door', x: 4.5, z: 7.5 } }) });
   assert.equal(markerResponse.status, 201, (await markerResponse.clone().json()).error);
@@ -73,7 +73,7 @@ test('custom marker types validate bundled fields, reassign atomically, undo/red
   const publicManifest = await fetch(`${origin}/api/map/manifest?floor=f1`, { cache: 'no-store' }).then(response => response.json());
   assert.equal(publicManifest.markers[0].type, 'stairs');
   assert.equal(publicManifest.markerTypes.some(item => item.id === type.id), false);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
 
   // Custom type definitions are part of the durable project snapshot and public release.
   const renamed = await fetch(`${origin}/api/project/marker-types`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 7, type: { name: 'Relics II', color: '#aabbcc', icon: 'other' } }) });
@@ -108,7 +108,7 @@ test('metadata save failure preserves the type for a full save retry', async t =
   assert.equal(renders, 0, 'the failed metadata-only attempt still avoids terrain rendering');
   const save = await fetch(`${origin}/api/generation/save`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1 }) });
   assert.equal(save.status, 200, await save.clone().text());
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   const manifest = await fetch(`${origin}/api/map/manifest?floor=f1`, { cache: 'no-store' }).then(response => response.json());
   assert.equal(manifest.markerTypes.find(type => type.name === 'Artifacts').icon, 'relic');
 });

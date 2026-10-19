@@ -9,6 +9,18 @@ export function mountPlayerTracking(hooks) {
   const panel = document.createElement('aside'); panel.className = 'players-panel'; panel.setAttribute('aria-label', 'Live Minecraft players');
   panel.innerHTML = `<details open><summary>Players <span id="player-count">0</span></summary><p id="players-status" role="status">Connecting…</p><div id="player-follow" hidden><span></span><button type="button">Stop</button></div><div id="player-list"></div><div id="missing-player-list"></div></details>`;
   document.body.append(panel);
+  panel.id = 'players-panel'; panel.setAttribute('aria-label', 'Players and previous runs');
+  const heading = document.createElement('div'); heading.className = 'sidebar-heading players-heading';
+  const title = document.createElement('h2'); title.textContent = 'Players & runs';
+  const closePanel = document.createElement('button'); closePanel.type = 'button'; closePanel.className = 'minecraft-close'; closePanel.textContent = '×'; closePanel.setAttribute('aria-label', 'Hide players and previous runs');
+  heading.append(title, closePanel); panel.prepend(heading);
+  const reopenPanel = document.createElement('button'); reopenPanel.type = 'button'; reopenPanel.className = 'sidebar-reopen players-reopen'; reopenPanel.textContent = '☰'; reopenPanel.hidden = true;
+  reopenPanel.setAttribute('aria-label', 'Open players and previous runs'); reopenPanel.setAttribute('aria-controls', panel.id); reopenPanel.setAttribute('aria-expanded', 'true'); document.body.append(reopenPanel);
+  closePanel.addEventListener('click', () => {
+    panel.querySelector('[popover]:popover-open')?.hidePopover();
+    panel.hidden = true; reopenPanel.hidden = false; reopenPanel.setAttribute('aria-expanded', 'false'); reopenPanel.focus();
+  });
+  reopenPanel.addEventListener('click', () => { panel.hidden = false; reopenPanel.hidden = true; reopenPanel.setAttribute('aria-expanded', 'true'); closePanel.focus(); });
   const layer = document.createElement('div'); layer.id = 'player-layer'; $('#map-frame').append(layer);
   const waypoints = document.createElement('div'); waypoints.id = 'waypoint-layer'; $('#map-frame').append(waypoints);
   let waypointRevision = null, waypointFloor = null;
@@ -29,7 +41,7 @@ export function mountPlayerTracking(hooks) {
   let missingPlayers = [], liveRun = null, followedRunId = null, followedPlayer = null;
   let players = [], sections = [], local = null, editingRevision = null, lastSuccess = 0, received = 0, following = null, navigation = 0, switching = false, stale = false, notice = '', disposed = false, wasEditing = false;
   const trackers = mountTrackerPoints({ ...hooks, follow: player => void follow(player, true) }, editor, panel, refreshEditor);
-  const runs = mountDungeonRuns({ ...hooks, stopLive: () => stop(), presence: run => {
+  const runs = mountDungeonRuns({ ...hooks, captureReplay: sample => trackers.captureReplay(sample), stopLive: () => stop(), presence: run => {
     liveRun = run;
     missingPlayers = (run?.participants ?? []).filter(p => p.missingSince != null);
     const participant = run?.participants.find(p => p.uuid === following);

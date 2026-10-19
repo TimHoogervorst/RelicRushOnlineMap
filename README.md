@@ -30,6 +30,10 @@ Wereldbouw is a Dutch-speaking Minecraft server, so you'll need to speak Dutch t
 
 The map is built from Minecraft schematics and rendered using Minecraft's block models and textures. A server-side tracker reads player positions and saves their routes for live viewing and replay. An editor lets us arrange floors, update the dungeon, and add markers and tracking waypoints without rebuilding the website.
 
+Zooming in loads a separate detail image, rendered from the same geometry at up to 32 pixels per block. The overview stays visible while detail loads, and map coordinates and zoom stay unchanged. Detail resolution is capped by the renderer's 16-million-pixel limit; floors already at that limit retain their base image. Normal startup or the next full project save generates detail images for older maps when Minecraft assets are available. Both image levels are included in backups and reused for marker-only edits. Labels and popovers keep their screen size as the map zooms.
+
+To correct future tracking from a saved run, enter Edit, open the replay, follow a player, pause, and choose **Add tracker point**. Capture uses the last recorded observation at the selected time; choose its correct calibrated section and save. No live player is required, and the recording remains unchanged. The right-hand Players & runs panel can be hidden with its close button and reopened from the button on the right edge.
+
 It runs as a single Docker app, using Node.js, SQLite, and a browser interface. Project exports bundle the map, settings, assets, and recordings into a ZIP that can be restored in a fresh container.
 
 This was made for Relic Rush and the way our dungeon works: a small companion project shaped around our own minigame.

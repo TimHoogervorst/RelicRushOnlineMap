@@ -87,7 +87,7 @@ test('connection API is authenticated, metadata-only, undoable, and durable in v
   assert.equal((await fetch(`${app.origin}/api/project/connections`, { method: 'POST', headers, body: body(3, { sectionAId: 's1', xA: 1, zA: 1, sectionBId: 's1', xB: 2, zB: 2 }) })).status, 409);
   const edit = await fetch(`${app.origin}/api/project/connections/${firstData.id}`, { method: 'PUT', headers, body: body(3, { sectionAId: 's1', xA: 3, zA: 4, sectionBId: 's2', xB: 5, zB: 6, label: 'Edited' }) });
   assert.equal(edit.status, 200, (await edit.clone().json()).error);
-  assert.equal(renders, 2, 'connection metadata edits must not render terrain');
+  assert.equal(renders, 4, 'connection metadata edits must not render terrain');
   let manifest = await fetch(`${app.origin}/api/map/manifest?floor=f1`).then(response => response.json());
   assert.equal(manifest.connections.length, 2);
   assert.equal(manifest.connections.find(item => item.label === 'Edited').displayB.x, 45);
@@ -97,7 +97,7 @@ test('connection API is authenticated, metadata-only, undoable, and durable in v
   assert.equal((await fetch(`${app.origin}/api/project/connections/undo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 7 }) })).status, 200);
   manifest = await fetch(`${app.origin}/api/map/manifest?floor=f1`).then(response => response.json());
   assert.equal(manifest.connections.length, 2);
-  assert.equal(renders, 2);
+  assert.equal(renders, 4);
   await new Promise(resolve => app.server.close(resolve)); app = await listen();
   manifest = await fetch(`${app.origin}/api/map/manifest?floor=f1`).then(response => response.json());
   assert.equal(manifest.connections.length, 2);

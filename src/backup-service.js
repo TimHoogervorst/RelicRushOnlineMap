@@ -122,6 +122,10 @@ function validateReferences(files) {
   let manifest; try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { throw new Error('Backup map manifest is invalid.'); }
   if (manifest.projectRevision !== pointer.revision || !Array.isArray(manifest.floors)) throw new Error('Backup map revision does not match its release pointer.');
   for (const floor of manifest.floors) {
+    if (floor.detailImage) {
+      const detail = floor.detailImage;
+      if (typeof detail.image !== 'string' || path.basename(detail.image) !== detail.image || !files.has(`releases/${pointer.directory}/${detail.image}`) || !Number.isSafeInteger(detail.pixelSize) || detail.pixelSize < 4 || detail.pixelSize > 32 || !Number.isSafeInteger(detail.width) || detail.width < 1 || !Number.isSafeInteger(detail.height) || detail.height < 1) throw new Error('Backup map manifest references a missing or unsafe detail image.');
+    }
     if (typeof floor.image !== 'string' || path.basename(floor.image) !== floor.image || !files.has(`releases/${pointer.directory}/${floor.image}`)) throw new Error('Backup map manifest references a missing or unsafe image.');
     if (floor.heightGrid) {
       const relative = floor.heightGrid.path;

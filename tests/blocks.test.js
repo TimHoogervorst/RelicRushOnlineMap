@@ -87,7 +87,7 @@ test('section layout API regenerates transformed anchors, rejects collisions, su
   const moved = await saveLayout(1, 12, -3);
   assert.equal(moved.status, 200, (await moved.clone().json()).error);
   assert.equal((await moved.json()).revision, 2);
-  assert.equal(renders, 2, 'layout commits regenerate the entire affected floor image');
+  assert.equal(renders, 4, 'layout commits regenerate the entire affected floor image');
   const manifest = await fetch(`${origin}/api/map/manifest?floor=floor-1`, { cache: 'no-store' }).then(response => response.json());
   const movedSection = manifest.sections.find(section => section.id === 'section-2');
   assert.deepEqual([movedSection.labelX, movedSection.labelZ], [2.25, 1.75]);
@@ -259,9 +259,9 @@ test('authenticated block edits validate palette states, regenerate, and undo/re
   const headers = { cookie: login.headers.get('set-cookie').split(';')[0], origin, 'content-type': 'application/json' };
   assert.equal((await fetch(`${origin}/api/project/block-palette`, { headers }).then(response => response.json())).blocks.length, 2);
   const baseline = await fetch(`${origin}/api/generation/save`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1 }) });
-  assert.equal(baseline.status, 200); assert.equal(renders, 1);
+  assert.equal(baseline.status, 200); assert.equal(renders, 2);
   const add = await fetch(`${origin}/api/project/blocks`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1, sectionId: 'section-1', x: -1, y: 1, z: 5, state: { id: 'minecraft:oak_stairs', properties: { facing: 'north', half: 'bottom', shape: 'straight', waterlogged: 'false' } } }) });
-  assert.equal(add.status, 201, (await add.clone().json()).error); assert.equal((await add.json()).revision, 2); assert.equal(renders, 2);
+  assert.equal(add.status, 201, (await add.clone().json()).error); assert.equal((await add.json()).revision, 2); assert.equal(renders, 4);
   const invalid = await fetch(`${origin}/api/project/blocks`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 2, sectionId: 'section-1', x: -1, y: 1, z: 5, state: { id: 'minecraft:oak_stairs', properties: { facing: 'sideways' } } }) });
   assert.equal(invalid.status, 400);
   const invalidCombo = await fetch(`${origin}/api/project/blocks`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 2, sectionId: 'section-1', x: -1, y: 1, z: 5, state: { id: 'minecraft:oak_stairs', properties: { facing: 'north', half: 'top', shape: 'straight', waterlogged: 'false' } } }) });
@@ -271,7 +271,7 @@ test('authenticated block edits validate palette states, regenerate, and undo/re
   const undo = await fetch(`${origin}/api/project/blocks/undo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 3 }) });
   assert.equal(undo.status, 200, (await undo.clone().json()).error); assert.equal((await undo.json()).revision, 4);
   const redo = await fetch(`${origin}/api/project/blocks/redo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 4 }) });
-  assert.equal(redo.status, 200); assert.equal((await redo.json()).revision, 5); assert.equal(renders, 5);
+  assert.equal(redo.status, 200); assert.equal((await redo.json()).revision, 5); assert.equal(renders, 10);
   const current = await fetch(`${origin}/api/map/manifest?floor=floor-1`, { cache: 'no-store' }).then(response => response.json());
   assert.equal(current.projectRevision, 5);
   assert.equal(current.sections[0].placementX, 1, 'display frame expands while section local placement/origin remains independent');

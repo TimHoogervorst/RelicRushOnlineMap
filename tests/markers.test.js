@@ -51,7 +51,7 @@ test('marker CRUD is authorized, revisioned, section-local, published without re
   const headers = { cookie, origin, 'content-type': 'application/json' };
   const baseline = await fetch(`${origin}/api/generation/save`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1 }) });
   assert.equal(baseline.status, 200);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   const add = async (name, x, z) => fetch(`${origin}/api/project/markers`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1, marker: { sectionId: 's1', type: 'chest', name, description: '', x, z } }) });
   const first = await add('Chest One', 61.5, 34.5);
   assert.equal(first.status, 201, (await first.clone().json()).error);
@@ -60,7 +60,7 @@ test('marker CRUD is authorized, revisioned, section-local, published without re
   const second = await fetch(`${origin}/api/project/markers`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 2, marker: { sectionId: 's1', type: 'chest', name: 'Chest Two', description: 'Second cache', x: 27.5, z: 8.5 } }) });
   assert.equal(second.status, 201, (await second.clone().json()).error);
   const secondResult = await second.json();
-  assert.equal(renders, 1, 'marker-only saves must reuse rendered terrain');
+  assert.equal(renders, 2, 'marker-only saves must reuse rendered terrain');
   assert.equal((await fetch(`${origin}/api/project/markers`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 1, marker: { sectionId: 's1', type: 'chest', name: 'Stale', x: 0.5, z: 0.5 } }) })).status, 409);
   const invalid = await fetch(`${origin}/api/project/markers`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 3, marker: { sectionId: 's1', type: 'untrusted', name: 'Bad', x: 1, z: 1 } }) });
   assert.equal(invalid.status, 400);
@@ -72,7 +72,7 @@ test('marker CRUD is authorized, revisioned, section-local, published without re
   const movedResult = await moved.json();
   assert.equal(movedResult.marker.x, 11.5);
   assert.equal(movedResult.marker.z, 34.5);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
 
   const manifest = await fetch(`${origin}/api/map/manifest?floor=f1`, { cache: 'no-store' }).then(response => response.json());
   assert.equal(manifest.projectRevision, 4);
@@ -82,13 +82,13 @@ test('marker CRUD is authorized, revisioned, section-local, published without re
   const otherHeaders = { cookie: otherLogin.headers.get('set-cookie').split(';')[0], origin, 'content-type': 'application/json' };
   assert.equal((await fetch(`${origin}/api/project/markers/undo`, { method: 'POST', headers: otherHeaders, body: JSON.stringify({ expectedRevision: 4 }) })).status, 409, 'a separate login session has no undo history');
   assert.equal((await fetch(`${origin}/api/project/markers/${secondResult.marker.id}`, { method: 'DELETE', headers, body: JSON.stringify({ expectedRevision: 4 }) })).status, 200);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   const undo = await fetch(`${origin}/api/project/markers/undo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 5 }) });
   assert.equal(undo.status, 200, (await undo.clone().json()).error);
   assert.equal((await fetch(`${origin}/api/map/manifest?floor=f1`).then(response => response.json())).markers.length, 2);
   const redo = await fetch(`${origin}/api/project/markers/redo`, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 6 }) });
   assert.equal(redo.status, 200, (await redo.clone().json()).error);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   await new Promise(resolve => server.close(resolve));
   const restarted = await listen(createApp({ dataDir, password: 'secret', initializeWorker: false, renderer }));
   t.after(async () => new Promise(resolve => restarted.server.close(resolve)));

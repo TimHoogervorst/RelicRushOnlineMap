@@ -267,7 +267,7 @@ test('waypoint API requires auth/origin, publishes metadata without rendering, a
   assert.equal(baseline.status, 200, await baseline.text());
   assert.equal((await fetch(endpoint, { method: 'PUT', headers: { ...headers, origin: 'https://other.example' }, body: '{}' })).status, 403);
   const response = await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 1, calibration: calibration() }) });
-  const saved = await response.json(); assert.equal(response.status, 200, JSON.stringify(saved)); assert.equal(saved.saved, true); assert.equal(renders, 1);
+  const saved = await response.json(); assert.equal(response.status, 200, JSON.stringify(saved)); assert.equal(saved.saved, true); assert.equal(renders, 2);
   assert.equal((await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, calibration: calibration() }) })).status, 409);
   const live = await fetch(`${origin}/api/players`).then(r => r.json());
   assert.equal(live.players[0].sectionId, 's'); assert.equal(live.projectRevision, 2);
