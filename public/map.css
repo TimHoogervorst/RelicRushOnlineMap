@@ -210,3 +210,103 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 .run-date-heading { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
 .run-date-popover input:focus-visible { outline: 2px solid #b8d597; outline-offset: 2px; }
 .run-date-clear { margin-top: 10px; }
+/* Minecraft Java GUI textures: preserve the original nine-slice borders. */
+:root { --ui-text: #f0f0f0; --ui-muted: #bcbcbc; --ui-line: #555; }
+.toolbar { background: #252525 url('/ui/menu_background.png') repeat; background-size: 32px; border-bottom: 2px solid #080808; box-shadow: inset 0 -2px #656565, 0 3px #0006; gap: 24px; }
+.brand { min-width: 0; }
+.brand-logo { display: block; width: 190px; height: 56px; object-fit: contain; image-rendering: pixelated; }
+.floor-picker { color: var(--ui-text); text-shadow: 1px 1px #000; }
+.sidebar, .players-panel, #block-inspector, #marker-popup, .cell-popup, .run-date-popover {
+  border: 6px solid transparent; border-image: url('/ui/popup-background.png') 6 fill / 6px / 0 stretch;
+  border-radius: 0; background: #303030; box-shadow: 4px 4px #0007; color: var(--ui-text); image-rendering: pixelated;
+}
+.sidebar { padding: 14px; }
+.players-panel { padding: 10px; }
+.sidebar h2, .sidebar h3, .players-panel summary, .editor-section > summary, .run-date-heading, .run-replay h3 { color: var(--ui-text); font-family: 'DM Mono', monospace; text-shadow: 2px 2px #111; }
+.sidebar p, .sidebar label, .run-panel label, .run-panel small, .run-status, .run-live, .run-gap, #players-status, .player-row small { color: var(--ui-muted); }
+button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close), select {
+  border: 3px solid transparent; border-image: url('/ui/widget-button.png') 3 fill / 3px / 0 stretch;
+  border-radius: 0; background: #777; color: var(--ui-text); text-shadow: 1px 2px #292929;
+  image-rendering: pixelated; box-shadow: 1px 2px #0008; font-family: 'DM Mono', monospace; transition: none;
+}
+button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):is(:hover, :focus-visible), select:is(:hover, :focus-visible) {
+  border-image-source: url('/ui/widget-button_highlighted.png'); color: #ffffa0; background: #888;
+}
+button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):active { translate: 0 1px; box-shadow: none; }
+button:disabled { border-image: url('/ui/widget-button_disabled.png') 1 fill / 3px / 0 stretch !important; color: #aaa !important; text-shadow: 1px 1px #222; cursor: not-allowed; }
+button:focus-visible, select:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+select { padding: 5px 8px; }
+select option { background: #303030; color: #eee; text-shadow: none; }
+.minecraft-close, #popup-close {
+  display: grid; place-items: center; flex: none; width: 26px; min-width: 26px; height: 26px; min-height: 26px;
+  padding: 0; border: 0; border-radius: 0; background: url('/ui/widget-cross_button.png') center / 22px 22px no-repeat;
+  font-size: 0; color: transparent; box-shadow: none; image-rendering: pixelated;
+}
+.minecraft-close:is(:hover, :focus-visible), #popup-close:is(:hover, :focus-visible) { background-image: url('/ui/widget-cross_button_highlighted.png'); }
+.sidebar-heading { gap: 10px; margin-bottom: 12px; }
+.sidebar-heading h2 { margin: 0; }
+#legend-groups .legend-type { border-color: #484848; color: var(--ui-text); }
+.legend-type img { border: 0; border-radius: 0; }
+input[type='checkbox'] { appearance: none; display: inline-block; flex: none; width: 18px; height: 18px; border: 0; border-radius: 0; background: url('/ui/widget-checkbox.png') center / contain no-repeat; image-rendering: pixelated; cursor: pointer; vertical-align: middle; }
+input[type='checkbox']:checked { background-image: url('/ui/widget-checkbox_selected.png'); }
+input[type='checkbox']:is(:hover, :focus-visible) { background-image: url('/ui/widget-checkbox_highlighted.png'); outline: none; }
+input[type='checkbox']:checked:is(:hover, :focus-visible) { background-image: url('/ui/widget-checkbox_selected_highlighted.png'); }
+#marker-form input[type='checkbox'] { width: 18px; }
+.sidebar input:not([type='checkbox']):not([type='range']):not([type='color']), .sidebar textarea, .run-panel input:not([type='range']), #marker-form textarea, #marker-form input:not([type='hidden']):not([type='checkbox']), #waypoint-form input {
+  color: #eee; background: #151515; border: 1px solid #777; border-radius: 0; box-shadow: inset 2px 2px #080808;
+}
+.sidebar input[type='range'], .run-panel input[type='range'] { accent-color: #c6c6c6; }
+.run-search-bar { background: #151515; border-color: #777; border-radius: 0; }
+.run-search-bar:focus-within { outline-color: #fff; }
+.run-panel .run-search-bar input { border: 0; box-shadow: none; }
+.run-search-bar .run-date-toggle { border-width: 3px; border-radius: 0; }
+.run-date-toggle[data-active='true'] { color: #ffffa0 !important; }
+.run-date-toggle[data-active='true']::after { content: ''; position: absolute; width: 4px; height: 4px; background: #ffffa0; transform: translate(8px, 8px); }
+.run-card { background: #1d1d1d; border: 2px solid #111; border-left: 3px solid #888; padding: 8px; box-shadow: inset 1px 1px #454545; }
+.run-card.win { border-left-color: #9ec784; }
+.run-card.loss { border-left-color: #dd756a; }
+.run-card > button.run-participants { padding: 5px; }
+.run-person img, .player-row img { border-radius: 0; }
+.run-panel, .editor-section, .run-replay, .marker-size-setting { border-color: #555; }
+#player-count { background: #151515; border: 1px solid #666; border-radius: 0; }
+.player-row[aria-pressed='true'] { outline: 2px solid #ffffa0; outline-offset: -2px; }
+.map-caption, #marker-tooltip { background: #170d20f2; border: 2px solid #35205d; border-radius: 0; color: #ddd; box-shadow: 2px 2px #0008; }
+#marker-tooltip span, #marker-popup p { color: #c4c4c4; }
+@media (max-width: 600px) {
+  .toolbar { padding: 0 10px; gap: 8px; }
+  .brand { margin-right: 138px; }
+  .brand-logo { width: min(170px, calc(100vw - 158px)); height: 50px; }
+  .sidebar { padding: 12px; }
+  .players-panel { padding: 8px; }
+}
+
+/* First-visit title screen, using the same Minecraft popup frame. */
+#welcome-screen {
+  width: min(620px, calc(100vw - 28px)); max-height: calc(100dvh - 28px); margin: auto; padding: 24px 28px;
+  overflow: auto; color: #eee; background: #303030; border: 6px solid transparent;
+  border-image: url('/ui/popup-background.png') 6 fill / 6px / 0 stretch;
+  border-radius: 0; box-shadow: 6px 6px #0008; text-align: center; image-rendering: pixelated;
+}
+#welcome-screen::backdrop { background: #080b0bed; }
+.welcome-logo { display: block; width: min(360px, 100%); height: auto; margin: 0 auto 18px; image-rendering: pixelated; }
+.welcome-eyebrow { margin: 0 0 8px; color: #f8ce73; font: 11px 'DM Mono', monospace; }
+#welcome-title { margin: 0 0 14px; font: 500 20px/1.4 'DM Mono', monospace; text-shadow: 2px 2px #111; }
+#welcome-intro, .welcome-server p { margin: 0; font-size: 13px; line-height: 1.7; color: #c9c9c9; }
+#welcome-screen strong { color: #eee; }
+.welcome-features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 22px 0; text-align: left; }
+.welcome-features p { margin: 0; padding: 12px; background: #222; border: 1px solid #555; box-shadow: inset 2px 2px #171717; }
+.welcome-features strong { display: block; margin-bottom: 7px; font: 12px/1.5 'DM Mono', monospace; }
+.welcome-features span { color: #bcbcbc; font-size: 12px; line-height: 1.6; }
+.welcome-server { padding: 16px 0 0; border-top: 2px solid #555; }
+.welcome-server h2 { margin: 0 0 8px; font: 500 14px 'DM Mono', monospace; text-shadow: 2px 2px #111; }
+#copy-server-ip { margin-top: 14px; height: 38px; padding: 0 18px; color: #ffffa0; user-select: text; }
+.welcome-server #copy-server-status { margin: 8px 0 18px; min-height: 18px; font-size: 11px; color: #c9c9c9; }
+#welcome-enter { width: 100%; height: 40px; }
+@media (max-width: 600px) {
+  #welcome-screen { padding: 18px; }
+  .welcome-logo { width: 260px; margin-bottom: 12px; }
+  #welcome-title { font-size: 17px; }
+  .welcome-features { grid-template-columns: 1fr; gap: 8px; margin: 16px 0; }
+  .welcome-features p { padding: 8px 12px; }
+  .welcome-features strong { margin-bottom: 2px; }
+}

@@ -6,35 +6,83 @@ import { writeFileSync, rmSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createArchive, makeManifest, readArchive, validateManifest } from './backup-archive.js';
 
-const MAX_FILE = 512 * 1024 * 1024;
-const MAX_TOTAL = 2 * 1024 * 1024 * 1024;
-const EXCLUDED = /(^|\/)(?:\.building-[^/]+|[^/]*\.tmp|asset-upload-[^/]+|resource-pack-upload-[^/]+)$/;
-function relativeSafe(root, file) { const relative = path.relative(root, file).split(path.sep).join('/'); if (!relative || relative.startsWith('../') || path.isAbsolute(relative)) throw new Error('Unsafe file path while preparing project backup.'); return relative; }
+import { BACKUP_LIMITS } from './backup-limits.js';
 
-async function collectFiles(directory, prefix, output, budget) {
+const MAX_FILE = BACKUP_LIMITS.entryBytes;
+const MAX_TOTAL = BACKUP_LIMITS.totalBytes;
+const EXCLUDED = /(^|\/)(?:\.building-[^/]+|[^/]*\.tmp|asset-upload-[^/]+|resource-pack-upload-[^/]+)$/;
+export function formatBackupSize(bytes) {
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  const index = Math.min(3, Math.floor(Math.log2(Math.max(1, bytes)) / 10));
+  return `${(bytes / 1024 ** index).toFixed(index ? 2 : 0)} ${units[index]}`;
+}
+
+async function collectFiles(directory, prefix, output) {
   let entries; try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
   for (const entry of entries) {
     const full = path.join(directory, entry.name), relative = `${prefix}/${entry.name}`;
     if (EXCLUDED.test(relative)) continue;
     if (entry.isSymbolicLink()) throw new Error(`Project contains a symbolic link that cannot be backed up: ${relative}`);
-    if (entry.isDirectory()) await collectFiles(full, relative, output, budget);
-    else if (entry.isFile()) { const info = await stat(full); budget.total += info.size; if (info.size > MAX_FILE || budget.total > MAX_TOTAL) throw new Error('Project files exceed the backup decoded size limit.'); output.set(relative, await readFile(full)); }
+    if (entry.isDirectory()) await collectFiles(full, relative, output);
+    else if (entry.isFile()) output.set(relative, { file: full, size: (await stat(full)).size });
   }
 }
 
-export async function createProjectBackup({ dataDir, recovery = false }) {
+async function inventory({ dataDir, assetsDir = path.join(dataDir, 'assets', 'minecraft'), databasePath = path.join(dataDir, 'project.sqlite') }) {
+  const files = new Map();
+  const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+  try { files.set('project.sqlite', { file: databasePath, size: db.pragma('page_count', { simple: true }) * db.pragma('page_size', { simple: true }) }); }
+  finally { db.close(); }
+  await collectFiles(path.join(dataDir, 'assets'), 'assets', files);
+  if (path.resolve(assetsDir) !== path.resolve(dataDir, 'assets', 'minecraft')) {
+    for (const name of [...files.keys()]) if (name.startsWith('assets/minecraft/') || name.startsWith('assets/resource-pack/')) files.delete(name);
+    await collectFiles(assetsDir, 'assets/minecraft', files);
+    await collectFiles(path.join(path.dirname(assetsDir), 'resource-pack'), 'assets/resource-pack', files);
+  }
+  await collectFiles(path.join(dataDir, 'releases'), 'releases', files);
+  let excludedReleaseBytes = 0;
+  if (files.has('releases/current.json')) {
+    const pointer = JSON.parse(await readFile(files.get('releases/current.json').file, 'utf8'));
+    if (!Number.isSafeInteger(pointer.revision) || pointer.revision < 0 || pointer.directory !== `revision-${pointer.revision}`) throw new Error('Project release pointer is invalid.');
+    if (!files.has(`releases/${pointer.directory}/manifest.json`)) throw new Error('The published map manifest is missing.');
+    for (const [name, entry] of files) if (name.startsWith('releases/') && name !== 'releases/current.json' && !name.startsWith(`releases/${pointer.directory}/`)) {
+      excludedReleaseBytes += entry.size; files.delete(name);
+    }
+  }
+  await collectFiles(path.join(dataDir, 'player-heads'), 'player-heads', files);
+  const breakdown = { database: 0, assets: 0, releases: 0, playerHeads: 0 };
+  for (const [name, entry] of files) breakdown[name === 'project.sqlite' ? 'database' : name.startsWith('assets/') ? 'assets' : name.startsWith('releases/') ? 'releases' : 'playerHeads'] += entry.size;
+  const totalBytes = Object.values(breakdown).reduce((sum, size) => sum + size, 0);
+  return { files, totalBytes, breakdown, excludedReleaseBytes, fileCount: files.size, limitBytes: MAX_TOTAL };
+}
+
+export async function projectBackupSize(options) {
+  const { files, ...summary } = await inventory(options);
+  return summary;
+}
+
+export async function createProjectBackup({ dataDir, assetsDir = path.join(dataDir, 'assets', 'minecraft'), recovery = false }) {
   await mkdir(dataDir, { recursive: true });
   const dbPath = path.join(dataDir, 'project.sqlite'), dbTemp = path.join(dataDir, `.backup-${randomUUID()}.sqlite`);
   const files = new Map();
   try {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try { await db.backup(dbTemp); } finally { db.close(); }
-    files.set('project.sqlite', await readFile(dbTemp));
-    const budget = { total: files.get('project.sqlite').length };
-    await collectFiles(path.join(dataDir, 'assets'), 'assets', files, budget);
-    await collectFiles(path.join(dataDir, 'releases'), 'releases', files, budget);
+    // Measure the entire selection before loading any file contents into memory.
+    const planned = await inventory({ dataDir, assetsDir, databasePath: dbTemp });
+    if (planned.totalBytes > MAX_TOTAL) throw new Error(`Project backup is ${formatBackupSize(planned.totalBytes)}; decoded size limit is ${formatBackupSize(MAX_TOTAL)}.`);
+    for (const [name, entry] of planned.files) {
+      if (entry.size > MAX_FILE) throw new Error(`Project file ${name} is ${formatBackupSize(entry.size)}; per-file limit is ${formatBackupSize(MAX_FILE)}.`);
+    }
+    let loadedBytes = 0;
+    for (const [name, entry] of planned.files) {
+      const bytes = await readFile(entry.file); loadedBytes += bytes.length;
+      if (bytes.length > MAX_FILE || loadedBytes > MAX_TOTAL) throw new Error(`Project files changed during backup (${formatBackupSize(loadedBytes)} read; total limit ${formatBackupSize(MAX_TOTAL)}). Retry the export.`);
+      files.set(name, bytes);
+    }
     const manifest = makeManifest(files); files.set('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2)));
     const archive = createArchive(files);
+    if (archive.length > BACKUP_LIMITS.archiveBytes) throw new Error('Project ZIP exceeds the 3 GiB restore upload limit.');
     if (recovery) await saveRecoverySnapshot(dataDir, archive);
     return archive;
   } finally { await rm(dbTemp, { force: true }).catch(() => {}); }
@@ -107,24 +155,30 @@ export async function restoreProjectBackup({ dataDir, bytes, confirm }) {
   try {
     await writeFile(path.join(stage, 'project.sqlite'), files.get('project.sqlite'), { flag: 'wx', mode: 0o600 });
     await writeFiles(path.join(stage, 'assets'), files, 'assets'); await writeFiles(path.join(stage, 'releases'), files, 'releases');
+    await writeFiles(path.join(stage, 'player-heads'), files, 'player-heads');
     if (existsSync(path.join(dataDir, 'project.sqlite'))) await createProjectBackup({ dataDir, recovery: true });
-    const live = ['project.sqlite', 'project.sqlite-wal', 'project.sqlite-shm', 'assets', 'releases'];
-    const moved = [];
+    const live = ['project.sqlite', 'project.sqlite-wal', 'project.sqlite-shm', 'assets', 'releases', 'player-heads'];
+    const moved = [], installed = [];
     try {
       for (const name of live) {
         const source = path.join(dataDir, name); try { await rename(source, path.join(rollback, name)); moved.push(name); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
-      for (const name of ['project.sqlite', 'assets', 'releases']) {
-        const source = path.join(stage, name); try { await rename(source, path.join(dataDir, name)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      for (const name of ['project.sqlite', 'assets', 'releases', 'player-heads']) {
+        const source = path.join(stage, name); try { await rename(source, path.join(dataDir, name)); installed.push(name); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
-      await rm(rollback, { recursive: true, force: true });
-      return { restored: true, files: files.size };
+      // Cleanup happens after the swap commits, never inside its rollback handler.
     } catch (error) {
-      for (const name of ['project.sqlite', 'assets', 'releases']) await rm(path.join(dataDir, name), { recursive: true, force: true });
+      keepRollback = true;
       const rollbackErrors = [];
+      for (const name of installed) { try { await rm(path.join(dataDir, name), { recursive: true, force: true }); } catch (cleanupError) { rollbackErrors.push(`${name}: ${cleanupError.message}`); } }
       for (const name of moved) { try { await rename(path.join(rollback, name), path.join(dataDir, name)); } catch (restoreError) { rollbackErrors.push(`${name}: ${restoreError.message}`); } }
       if (rollbackErrors.length) { keepRollback = true; throw new Error(`Restore failed (${error.message}); prior files remain in ${rollback} because rollback could not finish: ${rollbackErrors.join('; ')}`); }
+      keepRollback = false;
       throw new Error(`Restore failed and the prior project was rolled back: ${error.message}`);
     }
-  } finally { await rm(stage, { recursive: true, force: true }); if (!keepRollback) await rm(rollback, { recursive: true, force: true }); }
+    return { restored: true, files: files.size };
+  } finally {
+    await rm(stage, { recursive: true, force: true }).catch(() => {});
+    if (!keepRollback) await rm(rollback, { recursive: true, force: true }).catch(() => {});
+  }
 }

@@ -1138,7 +1138,19 @@ async function refreshSession() {
   } else { slicePreviewActive = false; selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); }
 }
 
+const backupSizeLabel = bytes => `${(bytes / 1024 ** (bytes >= 1024 ** 3 ? 3 : 2)).toFixed(2)} ${bytes >= 1024 ** 3 ? 'GiB' : 'MiB'}`;
+async function refreshBackupSize() {
+  const output = document.querySelector('#backup-size');
+  output.textContent = 'Measuring export size...';
+  try {
+    const response = await fetch('/api/backups/size', { cache: 'no-store' }), data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    output.textContent = `Export data: ${backupSizeLabel(data.totalBytes)} / ${backupSizeLabel(data.limitBytes)} limit (before ZIP compression). Database and replays: ${backupSizeLabel(data.breakdown.database)}; assets: ${backupSizeLabel(data.breakdown.assets)}; current map: ${backupSizeLabel(data.breakdown.releases)}; player heads: ${backupSizeLabel(data.breakdown.playerHeads)}. Older map renders excluded: ${backupSizeLabel(data.excludedReleaseBytes)}.`;
+  } catch (error) { output.textContent = error.message; }
+}
+
 async function refreshRecoverySnapshots() {
+  void refreshBackupSize();
   const list = document.querySelector('#backup-recovery-list'); if (!list) return;
   const response = await fetch('/api/backups/recovery', { cache: 'no-store' });
   if (!response.ok) { list.textContent = 'Recovery snapshots could not be listed.'; return; }
@@ -1228,12 +1240,14 @@ document.querySelector('#upload-resource-pack').addEventListener('click', async 
   if (response.ok && result.saved) { await loadFloor(floorManifest.id); await refreshSaveStatus(); }
 });
 document.querySelector('#backup-download').addEventListener('click', async () => {
+  void refreshBackupSize();
   const status = document.querySelector('#backup-status'); status.textContent = 'Preparing consistent SQLite and asset snapshot…';
   try {
     const response = await fetch('/api/backups/export', { cache: 'no-store' });
     if (!response.ok) { status.textContent = (await response.json()).error; return; }
     status.textContent = 'Packaging project files…';
-    const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = 'rr-map-project.zip'; link.click(); URL.revokeObjectURL(url); status.textContent = 'Project backup downloaded.';
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href = url; link.download = 'rr-map-project.zip'; link.click(); URL.revokeObjectURL(url); status.textContent = `Project backup downloaded (${backupSizeLabel(blob.size)} ZIP).`;
   } catch (error) { status.textContent = `Backup failed: ${error.message}`; }
 });
 document.querySelector('#backup-refresh').addEventListener('click', () => { document.querySelector('#backup-status').textContent = 'Recovery snapshots refreshed.'; void refreshRecoverySnapshots(); });
@@ -1248,7 +1262,7 @@ document.querySelector('#backup-restore').addEventListener('click', async () => 
     const response = await fetch('/api/backups/restore', { method: 'POST', headers: { 'content-type': 'application/zip', 'x-confirm-restore': confirmation }, body: file });
     const result = await response.json();
     status.textContent = response.ok ? result.message : `Restore failed: ${result.error}`;
-    if (response.ok) { await refreshPublicManifest(); await refreshSession(); await loadFloor(document.querySelector('#floor').value); await refreshRecoverySnapshots(); }
+    if (response.ok) window.location.reload();
   } catch (error) { status.textContent = `Restore failed: ${error.message}. The server preserves the previous project on validation or restore errors.`; }
   finally { button.disabled = false; }
 });

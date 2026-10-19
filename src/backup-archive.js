@@ -1,5 +1,6 @@
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { BACKUP_LIMITS } from './backup-limits.js';
 
 const encoder = new TextEncoder();
 const crcTable = new Uint32Array(256);
@@ -8,18 +9,23 @@ function crc32(data) { let crc = 0xffffffff; for (const byte of data) crc = crcT
 function safePath(name) { return typeof name === 'string' && name.length > 0 && name.length <= 512 && !name.startsWith('/') && !name.includes('\\') && !/^[A-Za-z]:/.test(name) && name.split('/').every(part => part && part !== '.' && part !== '..'); }
 
 export function createArchive(files) {
+  if (files.size > 65535) throw new Error('Project exceeds the ZIP entry limit (65535 files).');
   const locals = [], centrals = []; let offset = 0;
   for (const [name, raw] of files) {
     if (!safePath(name)) throw new Error(`Unsafe backup path: ${name}`);
-    const filename = Buffer.from(name, 'utf8'), data = Buffer.from(raw), compressed = deflateRawSync(data, { level: 6 }), crc = crc32(data);
+    const filename = Buffer.from(name, 'utf8'), data = Buffer.from(raw);
+    if (data.length > BACKUP_LIMITS.entryBytes) throw new Error(`Backup entry exceeds the 2 GiB limit: ${name}`);
+    const compressed = deflateRawSync(data, { level: 6 }), crc = crc32(data);
+    if (offset + 30 + filename.length + compressed.length > BACKUP_LIMITS.archiveBytes) throw new Error('Project ZIP exceeds the 3 GiB restore upload limit.');
     const local = Buffer.alloc(30 + filename.length); local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6); local.writeUInt16LE(8, 8); local.writeUInt32LE(crc, 14); local.writeUInt32LE(compressed.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(filename.length, 26); filename.copy(local, 30); locals.push(local, compressed);
     const central = Buffer.alloc(46 + filename.length); central.writeUInt32LE(0x02014b50); central.writeUInt16LE(0x0314, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x800, 8); central.writeUInt16LE(8, 10); central.writeUInt32LE(crc, 16); central.writeUInt32LE(compressed.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(filename.length, 28); central.writeUInt32LE((0o100600 << 16) >>> 0, 38); central.writeUInt32LE(offset, 42); filename.copy(central, 46); centrals.push(central); offset += local.length + compressed.length;
   }
   const centralBytes = Buffer.concat(centrals), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(centrals.length, 8); end.writeUInt16LE(centrals.length, 10); end.writeUInt32LE(centralBytes.length, 12); end.writeUInt32LE(offset, 16);
+  if (offset + centralBytes.length + end.length > BACKUP_LIMITS.archiveBytes) throw new Error('Project ZIP exceeds the 3 GiB restore upload limit.');
   return Buffer.concat([...locals, centralBytes, end]);
 }
 
-export function readArchive(bytes, { maxArchiveBytes = 1024 * 1024 * 1024, maxEntries = 150000, maxEntryBytes = 512 * 1024 * 1024, maxTotalBytes = 2 * 1024 * 1024 * 1024 } = {}) {
+export function readArchive(bytes, { maxArchiveBytes = BACKUP_LIMITS.archiveBytes, maxEntries = 150000, maxEntryBytes = BACKUP_LIMITS.entryBytes, maxTotalBytes = BACKUP_LIMITS.totalBytes } = {}) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 22 || bytes.length > maxArchiveBytes) throw new Error('Backup ZIP exceeds its archive limit or is invalid.');
   let end = -1; for (let p = Math.max(0, bytes.length - 65557); p <= bytes.length - 22; p++) if (bytes.readUInt32LE(p) === 0x06054b50) end = p;
   if (end < 0 || bytes.readUInt16LE(end + 4) !== 0 || bytes.readUInt16LE(end + 6) !== 0) throw new Error('Backup ZIP directory is invalid.');

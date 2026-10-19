@@ -14,7 +14,8 @@ import { decodeLitematic } from './litematic.js';
 import { saveExit, linkExits, removeExit, openProject, importSchematicSection, projectRevision, advanceProjectRevision, snapshotProject, saveMarker, deleteMarker, readMarker, restoreMarker, linkStairs, unlinkStair, readSectionBlocks, readSectionBlock, saveBlock, restoreBlock, moveSectionBlocks, restoreBlockMove, setSectionLayout, restoreSectionLayout, transformSection, restoreSectionTransform, sectionLayoutConflicts, saveSectionConnection, deleteSectionConnection, readSectionConnection, restoreSectionConnection, listMarkerTypes, saveCustomMarkerType, restoreCustomMarkerTypeCommand, saveSectionRenderSettings, restoreSectionRenderSettings, renameFloor, reorderFloor, renameSection, reorderSection, moveSectionToFloor, sectionDependents, deleteSectionLifecycle, deleteFloorLifecycle, captureProjectLifecycleState, restoreProjectLifecycleState } from './project-store.js';
 import { createGenerationService, renderInWorker } from './generation.js';
 import { extractResourcePack } from './assets.js';
-import { createProjectBackup, restoreProjectBackup } from './backup-service.js';
+import { createProjectBackup, restoreProjectBackup, projectBackupSize } from './backup-service.js';
+import { BACKUP_LIMITS } from './backup-limits.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -74,15 +75,16 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const playerHead = createHeadCache(path.join(dataDir, 'player-heads'), playerFetcher);
   const runRecorder = createRunRecorder({ database: path.join(dataDir, 'project.sqlite'), tracker: playerTracker, manifest: () => generation.currentManifest(), paused: () => restoreBusy || backupBusy });
   app.locals.runRecorder = runRecorder;
-  let activeWorker;
+  let activeWorker, initializationBusy = initializeWorker;
   let assetSetupBusy = false;
   const startWorker = (forceRender = false) => {
     if (!initializeWorker) return;
+    initializationBusy = true;
     workerState = { ready: false, warning: null, rendered: Boolean(workerState.rendered) };
     activeWorker = new Worker(new URL('./seed-worker.js', import.meta.url), { workerData: { dataDir, fixturePath: path.resolve(process.env.STARTING_FIXTURE ?? path.join(root, 'schematics', 'Start 0F.litematic')), assetsDir: minecraftAssetsDir, clientJar: process.env.MINECRAFT_CLIENT_JAR ?? (process.env.APPDATA ? path.join(process.env.APPDATA, 'PrismLauncher', 'libraries', 'com', 'mojang', 'minecraft', '26.3', 'minecraft-26.3-client.jar') : '/seed-assets/minecraft-client.jar'), forceRender } });
     activeWorker.on('message', value => { workerState = value; });
     activeWorker.on('error', error => { workerState = { ready: false, error: error.message }; });
-    activeWorker.on('exit', code => { if (code && !workerState.error) workerState = { ready: false, error: `Initialization worker exited (${code})` }; });
+    activeWorker.on('exit', code => { initializationBusy = false; if (code && !workerState.error) workerState = { ready: false, error: `Initialization worker exited (${code})` }; });
   };
 
   app.use(express.static(path.join(root, 'public'), { etag: true, maxAge: 0, dotfiles: 'deny' }));
@@ -262,14 +264,19 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     } catch { res.status(503).type('text').send('The map height grid is not available for this revision.'); }
   });
   app.get('/api/status', (_req, res) => res.json({ initialized: workerState.ready, mapAvailable: Boolean(workerState.rendered), warning: workerState.warning ?? null }));
+  app.get('/api/backups/size', requireEditor, async (_req, res) => {
+    try { res.set('Cache-Control', 'no-store').json(await projectBackupSize({ dataDir, assetsDir: minecraftAssetsDir })); }
+    catch (error) { res.status(503).json({ error: `Backup size unavailable: ${error.message}` }); }
+  });
   app.get('/api/backups/export', requireEditor, async (_req, res) => {
     if (backupBusy || restoreBusy) return res.status(409).json({ error: 'Another backup or restore is already in progress.' });
+    if (initializationBusy) return res.status(409).json({ error: 'Wait for map initialization to finish before exporting.' });
     backupBusy = true;
     try {
       if (['saving', 'unsaved'].includes(generation.queue.status.state)) return res.status(409).json({ error: 'Wait for the active map save to finish before downloading a project backup.' });
       const drainStarted = Date.now(); while (protectedRequests > 1) { if (Date.now() - drainStarted > 30000) return res.status(503).json({ error: 'Could not pause active editor requests for backup. Try again shortly.' }); await new Promise(resolve => setTimeout(resolve, 25)); }
       if (assetSetupBusy) return res.status(409).json({ error: 'Wait for asset setup to finish before downloading a project backup.' });
-      const archive = await createProjectBackup({ dataDir }); res.set('Cache-Control', 'no-store').type('application/zip').attachment('rr-map-project.zip').send(archive);
+      const archive = await createProjectBackup({ dataDir, assetsDir: minecraftAssetsDir }); res.set('Cache-Control', 'no-store').type('application/zip').attachment('rr-map-project.zip').send(archive);
     } catch (error) { res.status(503).json({ error: `Project backup could not be created: ${error.message}` }); }
     finally { backupBusy = false; }
   });
@@ -282,8 +289,9 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     try { const archive = await readFile(path.join(dataDir, 'backups', 'recovery', req.params.name)); res.type('application/zip').attachment(req.params.name).send(archive); }
     catch { res.status(404).json({ error: 'Recovery snapshot not found.' }); }
   });
-  app.post('/api/backups/restore', requireEditor, requireSameOrigin, express.raw({ type: ['application/zip', 'application/octet-stream'], limit: '1gb' }), async (req, res) => {
-    if (restoreBusy) return res.status(409).json({ error: 'Another project restore is already running.' });
+  app.post('/api/backups/restore', requireEditor, requireSameOrigin, express.raw({ type: ['application/zip', 'application/octet-stream'], limit: BACKUP_LIMITS.archiveBytes }), async (req, res) => {
+    if (restoreBusy || backupBusy) return res.status(409).json({ error: 'Another backup or restore is already running.' });
+    if (initializationBusy) return res.status(409).json({ error: 'Wait for map initialization to finish before restoring.' });
     restoreBusy = true;
     try {
       if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Choose a project backup ZIP first.' });
@@ -291,7 +299,11 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       const drainStarted = Date.now(); while (protectedRequests > 1) { if (Date.now() - drainStarted > 30000) return res.status(503).json({ error: 'Could not pause active editor requests for restore. Try again shortly.' }); await new Promise(resolve => setTimeout(resolve, 25)); }
       const result = await restoreProjectBackup({ dataDir, bytes: req.body, confirm: req.get('x-confirm-restore') });
       runRecorder.reset();
-      startWorker(false);
+      generation.queue.reset();
+      for (const history of [trackerHistory, markerHistory, markerTypeHistory, blockHistory, sectionHistory, sectionTransformHistory, connectionHistory, renderSettingsHistory, lifecycleHistory]) history.clear();
+      // The ZIP already contains the published images. Do not seed or regenerate them.
+      const restoredMap = await generation.currentManifest().catch(() => null);
+      workerState = { ready: true, rendered: Boolean(restoredMap), warning: null, currentRevision: restoredMap?.projectRevision ?? 0 };
       res.json({ ...result, message: 'Project restored. Reload the map to see the restored revision.' });
     } catch (error) { res.status(400).json({ error: error.message || 'Project restore failed. The existing project was preserved.' }); }
     finally { restoreBusy = false; }
@@ -872,12 +884,12 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.all('/api/editor/*path', requireEditor, (_req, res) => res.status(404).json({ error: 'Editor operation is not available yet.' }));
   app.all('/api/assets/*path', requireEditor, (_req, res) => res.status(404).json({ error: 'Asset operation is not available yet.' }));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API operation is not available.' }));
-  app.use((error, _req, res, _next) => {
+  app.use((error, req, res, _next) => {
     res.locals.releaseAssetSetup?.();
-    res.status(error.status === 413 ? 413 : 400).json({ error: error.status === 413 ? 'Upload exceeds the 128 MiB compressed limit.' : 'Invalid request.' });
+    res.status(error.status === 413 ? 413 : 400).json({ error: error.status === 413 ? (req.path === '/api/backups/restore' ? 'Project ZIP exceeds the 3 GiB restore upload limit.' : 'Upload exceeds the 128 MiB compressed limit.') : 'Invalid request.' });
   });
 
-  if (initializeWorker) mkdir(dataDir, { recursive: true }).then(() => startWorker()).catch(error => { workerState = { ready: false, error: error.message }; });
+  if (initializeWorker) mkdir(dataDir, { recursive: true }).then(() => startWorker()).catch(error => { initializationBusy = false; workerState = { ready: false, error: error.message }; });
   if (recordRuns) mkdir(dataDir, { recursive: true }).then(() => runRecorder.start()).catch(error => console.error('Could not start run recording:', error));
   return app;
 }

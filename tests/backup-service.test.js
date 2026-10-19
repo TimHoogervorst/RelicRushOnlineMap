@@ -1,4 +1,6 @@
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,4 +47,44 @@ test('recovery keeps only the newest five snapshots', async t => {
   for (let index = 0; index < 6; index++) await createProjectBackup({ dataDir, recovery: true });
   const entries = await (await import('node:fs/promises')).readdir(path.join(dataDir, 'backups', 'recovery'));
   assert.equal(entries.filter(name => name.endsWith('.zip')).length, 5);
+});
+
+test('portable backup carries cached player heads and externally configured Minecraft assets', async t => {
+  const root = await temp(t), source = path.join(root, 'source'), target = path.join(root, 'target');
+  const assetsDir = path.join(root, 'mounted-assets', 'minecraft');
+  await mkdir(source, { recursive: true }); seed(source, 'portable');
+  await mkdir(assetsDir, { recursive: true });
+  await mkdir(path.join(root, 'mounted-assets', 'resource-pack'), { recursive: true });
+  await mkdir(path.join(source, 'player-heads'), { recursive: true });
+  await writeFile(path.join(assetsDir, 'asset-source.json'), '{"minecraftVersion":"26.3"}');
+  await writeFile(path.join(root, 'mounted-assets', 'resource-pack', 'custom.png'), 'custom texture');
+  await writeFile(path.join(source, 'player-heads', 'a'.repeat(32) + '.png'), 'cached head');
+  const archive = await createProjectBackup({ dataDir: source, assetsDir });
+  await restoreProjectBackup({ dataDir: target, bytes: archive, confirm: 'RESTORE PROJECT' });
+  assert.equal(await readFile(path.join(target, 'assets', 'minecraft', 'asset-source.json'), 'utf8'), '{"minecraftVersion":"26.3"}');
+  assert.equal(await readFile(path.join(target, 'assets', 'resource-pack', 'custom.png'), 'utf8'), 'custom texture');
+  assert.equal(await readFile(path.join(target, 'player-heads', 'a'.repeat(32) + '.png'), 'utf8'), 'cached head');
+});
+
+
+test('a failed file swap preserves destination files that have not moved yet', async t => {
+  const root = await temp(t), source = path.join(root, 'source'), target = path.join(root, 'target');
+  await mkdir(source); await mkdir(path.join(target, 'assets'), { recursive: true });
+  await mkdir(path.join(target, 'releases'));
+  seed(source, 'incoming'); seed(target, 'original');
+  await writeFile(path.join(target, 'assets', 'keep.txt'), 'original assets');
+  await writeFile(path.join(target, 'releases', 'keep.txt'), 'original release');
+  const archive = await createProjectBackup({ dataDir: source });
+  const rename = fs.rename;
+  fs.rename = async (from, to) => {
+    if (from === path.join(target, 'assets')) throw Object.assign(new Error('Simulated file lock'), { code: 'EBUSY' });
+    return rename(from, to);
+  };
+  syncBuiltinESMExports();
+  try { await assert.rejects(restoreProjectBackup({ dataDir: target, bytes: archive, confirm: 'RESTORE PROJECT' }), /rolled back/); }
+  finally { fs.rename = rename; syncBuiltinESMExports(); }
+  assert.equal(await readFile(path.join(target, 'assets', 'keep.txt'), 'utf8'), 'original assets');
+  assert.equal(await readFile(path.join(target, 'releases', 'keep.txt'), 'utf8'), 'original release');
+  const db = openProject(path.join(target, 'project.sqlite'));
+  try { assert.equal(snapshotProject(db).floors[0].id, 'original'); } finally { db.close(); }
 });

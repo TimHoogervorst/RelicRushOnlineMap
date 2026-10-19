@@ -5,6 +5,12 @@ export class SaveQueue {
   #latestRequested = 0;
   status = { state: 'saved', revision: 0, progress: null, error: null };
 
+  reset() {
+    if (this.#active || this.#pending) throw new Error('Wait for the active save before resetting the project.');
+    this.#latestRequested = 0;
+    this.status = { state: 'saved', revision: 0, progress: null, error: null };
+  }
+
   enqueue(revision, run) {
     if (!Number.isSafeInteger(revision) || revision < 1 || typeof run !== 'function') throw new TypeError('A save needs a positive revision and a job');
     if (revision < this.#latestRequested) return Promise.reject(new Error('Stale revision; reload and retry your edit.'));
