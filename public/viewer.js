@@ -435,6 +435,8 @@ function renderSidebar() {
   document.querySelector('#sidebar-reopen').hidden = sidebarOpen;
   legendPanel.hidden = false;
   editorPanel.hidden = !editorOpen;
+  document.querySelector('#section-label-layer').hidden = !editorOpen;
+  document.querySelector('#section-selection').toggleAttribute('hidden', !editorOpen);
   document.querySelector('#sidebar-heading-title').textContent = editorOpen ? 'Editing tools' : 'Legend';
   const modeButton = document.querySelector('#edit-mode');
   modeButton.textContent = editorOpen ? 'Done editing' : 'Edit';
@@ -792,26 +794,13 @@ function renderMarkers() {
   for (const type of markerTypes()) {
     const typed = markers.filter(marker => marker.type === type.id);
     if (!typed.length) continue;
-    const details = document.createElement('details'); details.open = true;
-    const summary = document.createElement('summary');
-    summary.style.color = type.color;
-    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = readMarkerVisibility(floorManifest.id, type.id); check.setAttribute('aria-label', `Show ${type.name.toLowerCase()}`);
-    check.addEventListener('click', event => event.stopPropagation());
+    const row = document.createElement('label'); row.className = 'legend-type';
+    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = readMarkerVisibility(floorManifest.id, type.id);
     check.addEventListener('change', () => { storeMarkerVisibility(floorManifest.id, type.id, check.checked); layer.querySelectorAll(`[data-type="${type.id}"]`).forEach(item => item.hidden = !check.checked); });
-    summary.append(check, ` ${type.name}`); details.append(summary);
-    for (const marker of typed) {
-      const entry = document.createElement('button'); entry.type = 'button'; entry.className = 'legend-entry';
-      const icon = document.createElement('img'); icon.src = inventoryIcon(type.icon); icon.alt = '';
-      icon.style.borderColor = type.color;
-      icon.style.border = `2px solid ${type.color}`;
-      entry.append(icon, document.createTextNode(marker.name));
-      entry.addEventListener('click', () => {
-        if (editorOpen) { populateMarkerForm(marker); return; }
-        highlightedMarker = marker.id; renderMarkers(); centerMarker(marker);
-      });
-      details.append(entry);
-    }
-    groups.append(details);
+    const icon = document.createElement('img'); icon.src = inventoryIcon(type.icon); icon.alt = '';
+    icon.style.borderColor = type.color;
+    row.append(check, icon, document.createTextNode(type.name));
+    groups.append(row);
   }
   if (!groups.childElementCount) groups.innerHTML = '<p>No markers on this floor.</p>';
 }

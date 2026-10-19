@@ -18,9 +18,9 @@ const playerHead = participant => {
 export function mountDungeonRuns(hooks, panel) {
   const area = document.createElement('section'); area.className = 'run-panel';
   area.innerHTML = `<details open><summary>Previous runs</summary><p class="run-live" role="status"></p>
-    <form class="run-search"><label>Player name<input name="name" type="search" maxlength="64" placeholder="Search every explorer"></label>
-    <details><summary>Date &amp; time</summary><label>On date<input name="day" type="date"></label><label>From<input name="from" type="datetime-local"></label><label>Until (exclusive)<input name="to" type="datetime-local"></label><small class="run-timezone"></small></details>
-    <button type="submit">Search runs</button><button type="reset">Clear</button></form>
+    <form class="run-search"><div class="run-search-bar"><input name="name" type="search" maxlength="64" aria-label="Search runs by player name" placeholder="Search player names">
+    <button type="button" class="run-date-toggle" popovertarget="run-date-filters" aria-label="Filter runs by date and time" title="Filter by date and time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18m-14 4h3m4 0h3m-10 3h3"/></svg></button></div>
+    <div id="run-date-filters" class="run-date-popover" popover><div class="run-date-heading"><strong>Date &amp; time</strong><button type="button" popovertarget="run-date-filters" popovertargetaction="hide" aria-label="Close date filters">&times;</button></div><label>On date<input name="day" type="date"></label><label>From<input name="from" type="datetime-local"></label><label>Until (exclusive)<input name="to" type="datetime-local"></label><small class="run-timezone"></small><button type="button" class="run-date-clear">Clear dates</button></div></form>
     <p class="run-status" role="status"></p><div class="run-results"></div><button type="button" class="run-more" hidden>Show 10 more</button></details>
     <section class="run-replay" hidden aria-label="Run replay"><h3>Replay</h3><p class="run-title"></p><p class="run-gap" role="status"></p><div class="run-actions"><button type="button" class="run-play">Play</button><button type="button" class="run-restart">Restart</button></div><label>Timeline<input class="run-timeline" type="range" min="0" value="0" step="100" aria-label="Replay position"></label><output class="run-clock"></output><div class="run-actions"><label>Speed<select class="run-speed">${[0.5, 1, 2, 4, 8].map(v => `<option${v === 1 ? ' selected' : ''}>${v}</option>`).join('')}</select></label><label>Follow<select class="run-follow"><option value="">Free camera</option></select></label></div><button type="button" class="run-exit">Back to live</button></section>`;
   panel.append(area);
@@ -42,6 +42,7 @@ export function mountDungeonRuns(hooks, panel) {
   document.querySelector('#cell-popup').append(place);
   let endpoint = null, draft = null, recording = null, tracks = new Map(), map = null, elapsed = 0, playing = false, lastFrame = null, drawingKey = '', navigating = false, missingSections = false;
   let queryVersion = 0, cursor = null, results = [], filters = {}, wasEditing = false, historyKey, opening = 0, refreshingMap = false;
+  let searchTimer;
   let timer, disposed = false, endpointDirty = false; const played = new Set(), seenLive = new Set();
   const report = error => { $('.run-status').textContent = error.message; };
   function renderEndpointForm(value) {
@@ -93,7 +94,16 @@ export function mountDungeonRuns(hooks, panel) {
   async function search(more = false) {
     const version = ++queryVersion;
     try {
-      if (!more) filters = readFilters();
+      clearTimeout(searchTimer);
+      if (!more) {
+        cursor = null; $('.run-more').hidden = true;
+        filters = readFilters();
+        if (filters.name.length > 0 && filters.name.length < 3) {
+          results = []; renderResults();
+          $('.run-status').textContent = 'Enter at least 3 characters to search player names.';
+          return;
+        }
+      }
       $('.run-status').textContent = 'Loading recordings…';
       const params = new URLSearchParams({ ...filters, limit: more ? 10 : 5, ...(more && cursor ? cursor : {}) });
       const data = await request(`/api/runs?${params}`);
@@ -102,9 +112,30 @@ export function mountDungeonRuns(hooks, panel) {
       $('.run-status').textContent = results.length ? `${results.length} recordings` : 'No recordings match these filters.';
     } catch (error) { if (version === queryVersion) report(error); }
   }
-  $('.run-search').addEventListener('submit', e => { e.preventDefault(); void search(); });
-  $('.run-search').addEventListener('change', () => void search());
-  $('.run-search').addEventListener('reset', () => setTimeout(() => void search(), 0));
+  const datePopover = $('.run-date-popover'), dateToggle = $('.run-date-toggle');
+  function positionDatePopover() {
+    const rect = dateToggle.getBoundingClientRect();
+    datePopover.style.left = `${Math.max(10, Math.min(rect.right - datePopover.offsetWidth, window.innerWidth - datePopover.offsetWidth - 10))}px`;
+    datePopover.style.top = `${Math.max(10, Math.min(rect.bottom + 8, window.innerHeight - datePopover.offsetHeight - 10))}px`;
+  }
+  datePopover.addEventListener('toggle', event => { if (event.newState === 'open') positionDatePopover(); });
+  window.addEventListener('resize', () => { if (datePopover.matches(':popover-open')) positionDatePopover(); });
+  function scheduleSearch(delay = 0) {
+    clearTimeout(searchTimer);
+    queryVersion++; cursor = null; $('.run-more').hidden = true;
+    results = []; renderResults();
+    const name = $('.run-search [name=name]').value.trim();
+    $('.run-status').textContent = name.length > 0 && name.length < 3 ? 'Enter at least 3 characters to search player names.' : 'Searching...';
+    dateToggle.dataset.active = String(['day', 'from', 'to'].some(key => $(`[name=${key}]`).value));
+    searchTimer = setTimeout(() => void search(), delay);
+  }
+  $('.run-search').addEventListener('submit', e => { e.preventDefault(); scheduleSearch(); });
+  $('.run-search [name=name]').addEventListener('input', () => scheduleSearch(300));
+  datePopover.addEventListener('change', () => scheduleSearch());
+  $('.run-date-clear').addEventListener('click', () => {
+    for (const key of ['day', 'from', 'to']) $(`[name=${key}]`).value = '';
+    scheduleSearch();
+  });
   $('.run-more').addEventListener('click', () => void search(true));
   async function open(id) {
     const token = ++opening;
@@ -216,7 +247,7 @@ export function mountDungeonRuns(hooks, panel) {
     } catch (error) { $('.run-live').textContent = `Recording status unavailable: ${error.message}`; }
     if (!disposed) timer = setTimeout(poll, 2000);
   }
-  window.addEventListener('pagehide', () => { disposed = true; clearTimeout(timer); });
+  window.addEventListener('pagehide', () => { disposed = true; clearTimeout(timer); clearTimeout(searchTimer); queryVersion++; });
   window.addEventListener('pageshow', event => { if (event.persisted) { disposed = false; void poll(); } });
   void poll();
   return { draw, get replaying() { return Boolean(recording); }, stopFollow() { $('.run-follow').value = ''; }, get following() { return recording && $('.run-follow').value; } };

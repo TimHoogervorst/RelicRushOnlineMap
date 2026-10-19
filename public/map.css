@@ -51,7 +51,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #viewport { position: relative; width: 100%; height: calc(100vh - 68px); overflow: hidden; background-color: #101513; background-image: radial-gradient(#28312c 1px, transparent 1px); background-size: 22px 22px; touch-action: none; }
 #map-frame { position: absolute; left: 50%; top: 50%; transform-origin: center; will-change: transform; cursor: grab; }
 #map-frame.dragging { cursor: grabbing; }
-#map { display: block; image-rendering: pixelated; max-width: none; box-shadow: 0 22px 60px #0009; border: 1px solid #697267; }
+#map { display: block; image-rendering: pixelated; max-width: none; }
 #block-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 #section-selection { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 #section-connections { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
@@ -92,10 +92,9 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #marker-tooltip span { color: #c1cabb; font-size: 10px; }
 #marker-tooltip[hidden] { display: none; }
 #popup-close { position: absolute; right: 4px; top: 4px; min-width: 25px; width: 25px; height: 25px; padding: 0; }
-#legend-groups details { border-top: 1px solid #303a34; padding: 8px 0; }
-#legend-groups summary { cursor: pointer; color: #d8dfd2; font-size: 12px; }
-.legend-entry { display: flex; align-items: center; gap: 8px; width: 100%; height: auto; min-height: 34px; margin-top: 5px; text-align: left; font-family: Manrope, sans-serif; }
-.legend-entry img { width: 22px; height: 22px; }
+#legend-groups .legend-type { display: flex; align-items: center; gap: 10px; min-height: 40px; margin: 0; padding: 7px 0; border-top: 1px solid #303a34; cursor: pointer; color: #d8dfd2; }
+.legend-type input { margin: 0; accent-color: #b8d597; }
+.legend-type img { width: 24px; height: 24px; border: 1px solid; border-radius: 4px; image-rendering: pixelated; }
 .coordinate-inputs { display: flex; gap: 8px; margin-top: 5px; }
 .coordinate-inputs input, #marker-form textarea, #marker-form select, #marker-form input:not([type=hidden]):not([type=checkbox]) { width: 100%; padding: 7px; color: #e5e7df; background: #202825; border: 1px solid #37413b; border-radius: 5px; font: 12px Manrope, sans-serif; }
 #marker-form input[type=checkbox] { width: auto; margin: 0 6px 0 0; vertical-align: middle; }
@@ -200,3 +199,14 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 .run-endpoint { position: absolute; z-index: 3; color: #b7e193; background: #17251fe8; border: 1px solid #9ec784; border-radius: 50%; width: 28px; height: 28px; text-align: center; line-height: 28px; pointer-events: none; }
 .replaying #player-layer { display: none; }
 @media (max-width: 600px) { .players-panel:has(.run-replay:not([hidden])) { max-height: 50vh; width: 230px; } }
+
+.run-search-bar { display: flex; align-items: stretch; margin: 10px 0; border: 1px solid #465044; border-radius: 6px; background: #202825; }
+.run-search-bar:focus-within { outline: 2px solid #b8d597; outline-offset: 2px; }
+.run-search-bar input { flex: 1; width: 0; border: 0; background: transparent; outline: none; }
+.run-search-bar .run-date-toggle { display: grid; place-items: center; flex: none; width: 34px; padding: 6px; border: 0; border-left: 1px solid #465044; border-radius: 0 5px 5px 0; }
+.run-date-toggle svg { width: 18px; height: 18px; }
+.run-date-toggle[data-active="true"] { color: #d9e8b7; background: #34452e; }
+.run-date-popover { position: fixed; inset: auto; margin: 0; width: min(280px, calc(100vw - 20px)); max-height: calc(100vh - 20px); overflow: auto; padding: 14px; color: #e5e7df; background: #171d1b; border: 1px solid #657860; border-radius: 8px; box-shadow: 0 12px 36px #0009; }
+.run-date-heading { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.run-date-popover input:focus-visible { outline: 2px solid #b8d597; outline-offset: 2px; }
+.run-date-clear { margin-top: 10px; }
