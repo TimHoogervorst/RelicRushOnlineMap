@@ -1,3 +1,5 @@
+import { createRunRecorder } from '../src/run-recorder.js';
+import { activeRun } from '../src/dungeon-runs.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
@@ -222,7 +224,7 @@ test('shared polling deduplicates requests and expires failures without treating
   const expired = await tracker.snapshot(manifest); assert.equal(expired.expired, true); assert.equal(expired.players.length, 0);
   time += 2000; fail = false; entries = [];
   const empty = await tracker.snapshot(manifest); assert.equal(empty.stale, false); assert.equal(empty.players.length, 0);
-  time += 2000; entries = [{ ...player, x: '100' }];
+  time += 30000; entries = [{ ...player, x: '100' }];
   assert.equal((await tracker.snapshot(manifest)).stale, true, 'malformed upstream records are a failed update');
 });
 
@@ -275,4 +277,72 @@ test('waypoint API requires auth/origin, publishes metadata without rendering, a
   await restoreProjectBackup({ dataDir, bytes: backup, confirm: 'RESTORE PROJECT' });
   const restored = openProject(path.join(dataDir, 'project.sqlite'));
   try { assert.deepEqual(snapshotProject(restored).floors[0].sections[0].calibration, saved.calibration); } finally { restored.close(); }
+});
+
+test('adaptive upstream polling shares requests and switches between dungeon, online, empty and long-idle intervals', async () => {
+  let time = 0, calls = 0, entries = [];
+  const manifest = { floors: [{ id: 'f', sections: [{ id: 's', placementX: 0, placementZ: 0, calibration: { ...calibration(), region: { min: { x: 90, y: 60, z: -30 }, max: { x: 110, y: 70, z: -10 } } } }] }] };
+  const tracker = createPlayerTracker({ now: () => time, fetcher: async () => { calls++; return Response.json({ players: entries }); } });
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 30000);
+  time = 29999;
+  assert.equal((await tracker.snapshot(manifest)).stale, false, 'scheduled idle cache is still valid');
+  assert.equal(calls, 1);
+  time = 30000; entries = [{ ...player, x: 1000 }];
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 15000);
+  time = 44999; await tracker.snapshot(manifest); assert.equal(calls, 2);
+  time = 45000; entries = [player];
+  const snapshots = await Promise.all([tracker.snapshot(manifest), tracker.snapshot(manifest, true), tracker.snapshot(manifest, false, true)]);
+  assert.equal(calls, 3); assert.equal(snapshots[0].pollIntervalMs, 1000);
+  time = 45999; await tracker.snapshot(manifest); assert.equal(calls, 3);
+  time = 46000; await tracker.snapshot(manifest); assert.equal(calls, 4);
+  time = 47000; entries = [];
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 30000);
+  for (time = 77000; time < 3647000; time += 30000) await tracker.snapshot(manifest);
+  time = 3647000;
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 60000);
+  const previousCalls = calls;
+  time = 3676999; assert.equal((await tracker.snapshot(manifest)).stale, false); assert.equal(calls, previousCalls);
+  time = 3677000; entries = [player];
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 1000);
+  time += 1000; entries = [];
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 30000, 'player presence resets the empty-server hour');
+});
+
+test('failed feeds cannot establish an hour of emptiness and ambiguous dungeon positions poll quickly', async () => {
+  let time = 0, fail = false, entries = [];
+  const tracker = createPlayerTracker({ now: () => time, fetcher: async () => { if (fail) throw new Error('offline'); return Response.json({ players: entries }); } });
+  const manifest = { floors: [{ id: 'f', sections: ['a', 'b'].map(id => ({ id, calibration: { ...calibration(), region: { min: { x: 90, y: 60, z: -30 }, max: { x: 110, y: 70, z: -10 } } } })) }] };
+  await tracker.snapshot(manifest);
+  time = 30000; fail = true; assert.equal((await tracker.snapshot(manifest)).stale, true);
+  time = 3600000; fail = false;
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 30000);
+  time += 30000; entries = [player];
+  const ambiguous = await tracker.snapshot(manifest, false, true);
+  assert.equal(ambiguous.observations[0].status, 'ambiguous');
+  assert.equal(ambiguous.pollIntervalMs, 1000);
+});
+
+
+test('recorder keeps the shared feed polling every second throughout invisibility and releases it on timeout', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-invisible-poll-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const database = path.join(dir, 'project.sqlite');
+  const manifest = { floors: [{ id: 'f', sections: [{ id: 's', placementX: 0, placementZ: 0, calibration: { ...calibration(), region: { min: { x: 90, y: 60, z: -30 }, max: { x: 110, y: 70, z: -10 } } } }] }] };
+  let time = 1000, calls = 0, entries = [player];
+  const tracker = createPlayerTracker({ now: () => time, fetcher: async () => { calls++; return Response.json({ players: entries }); } });
+  const recorder = createRunRecorder({ database, tracker, manifest: async () => manifest, now: () => time, onError: (_, e) => { throw e; } });
+  t.after(() => recorder.stop());
+  await recorder.tick();
+  time = 2000; entries = []; await recorder.tick();
+  for (time = 3000; time <= 6000; time += 1000) {
+    await Promise.all([recorder.tick(), tracker.snapshot(manifest)]);
+    assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 1000);
+  }
+  assert.equal(calls, 6, 'browser and recorder share one request each second');
+  time = 7000; entries = [player]; await recorder.tick();
+  const db = openProject(database);
+  try { assert.equal(activeRun(db).participants[0].absentSince, null); } finally { db.close(); }
+  time = 8000; entries = []; await recorder.tick();
+  time = 308000; await recorder.tick();
+  assert.equal((await tracker.snapshot(manifest)).pollIntervalMs, 30000);
 });

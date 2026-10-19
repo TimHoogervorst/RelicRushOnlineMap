@@ -13,11 +13,12 @@ Record dungeon attempts by one or two players continuously, retain them in the l
 - The first reliably mapped player starts the run. A second entering during the active run joins it.
 - Record while the server runs, even without website visitors. Use the published map rather than unsaved editor diagnostics.
 - Record each participant's identity, name, and route separately.
-- A healthy feed reporting a participant outside or absent starts their 15-second departure grace period. Returning before finalization cancels it and continues that participation.
-- Finalize departure after 15 seconds of confirmed absence. End the shared run when all participants have finished.
-- Finalized participants cannot rejoin that run. No replacements are added. Unexpected arrivals remain visible live but are not added to the occupied recording.
-- In the game, one player dying causes both players to disappear. The feed has no death signal, so use the final-position classification below.
-- Feed failures, stale data, and ambiguous assignments are not evidence of departure. An outage cancels pending departure countdowns; after recovery require a fresh 15 seconds of confirmed absence.
+- A healthy feed reporting a participant outside the dungeon ends their participation immediately, using their last recorded dungeon point.
+- Missing participants remain active for up to five minutes. A return inside continues the run and records invisibility between the last contact and return. Timeout ends the recording as Interrupted rather than inferring a death.
+- Editors can place a start sphere like the endpoint. Its configuration is snapshotted for new runs. Returning there after being missing starts a new run; passing through while continuously visible does not.
+- A different player entering while the prior runners are missing starts a new shared run. Otherwise, finalized participants cannot rejoin an occupied run, and third arrivals are not recorded.
+- Missing runners remain in the Players sidebar with faded heads, an invisibility icon, and ?Position unknown ? run still active.? Unknown positions are not plotted. Returning or ending the run clears this state.
+- Feed failures and ambiguous assignments are not evidence of departure. A feed outage preserves the existing missing timer.
 - A server restart or 60 seconds of unavailable/ambiguous tracking ends the recording as Interrupted. Preserve the recorded portion with a neutral indicator.
 
 ## Single endpoint and outcome
@@ -35,7 +36,7 @@ Record dungeon attempts by one or two players continuously, retain them in the l
 ## Recording and duration
 
 - Persist runs, participants, timed positions, and encounter events in the local database.
-- Record fresh feed observations, approximately every two seconds. Do not duplicate cached observations when browsers request tracking.
+- Record fresh feed observations, approximately every second while a run is active, including its entire missing-player grace period. Idle polling resumes after the run ends. Do not duplicate cached observations when browsers request tracking.
 - Retain world and section-local positions sufficient for classification and replay against section layouts.
 - Show total run duration and each participant's duration.
 - Total duration spans the first participant's entry through the last recorded dungeon position across participants. Individual duration spans that participant's entry through their last recorded dungeon position.
@@ -63,10 +64,10 @@ Record dungeon attempts by one or two players continuously, retain them in the l
 - Selecting a recording displays red routes with a contrasting outline and back glow; distinguish co-op routes with solid and dashed lines.
 - Animate both player heads on one clock, preserving their relative join times and observation timing.
 - Provide play/pause, a draggable timeline, restart, and 0.5x, 1x, 2x, 4x, and 8x speeds.
-- Connect recorded points across sections and tracking gaps on the same floor, and interpolate player heads in floor coordinates so playback keeps moving without lost-location notices. Preserve recorded elapsed time and stored observations; the connecting paths are presentation interpolation.
+- Except for invisibility intervals, connect recorded points across sections and tracking gaps on the same floor, and interpolate player heads in floor coordinates so playback keeps moving without lost-location notices. Preserve recorded elapsed time and stored observations; the connecting paths are presentation interpolation.
 - Do not connect lines between floors. Mark each departure with an exit icon and text naming the player and destination floor/section. While between floor observations, show the departure location and destination, then follow the player to the new floor.
 - For losses, mark each participant's final recorded position with an X labeled as their last known position. These markers remain visible alongside the full route when reviewing the recording.
-- Do not append 15 seconds of stationary playback for departure confirmation.
+- Do not append stationary playback for disappearance confirmation. Invisibility intervals have labeled last-contact and return points with durations, with a purple dotted connector on the same floor, or clickable contacts that navigate between floors. Labels show last-seen and reappearance timestamps; heads are not interpolated through invisibility.
 - Follow either participant across floors. Both heads appear whenever on the displayed floor.
 - Use sections' current layouts for historical section-local routes. Moving sections keeps routes aligned; deleted sections produce explicit map-section-unavailable gaps.
 - Clearly label replay mode, suspend live following, and hide live heads. Background recording continues. Back to live restores the live map.
@@ -91,11 +92,11 @@ Record dungeon attempts by one or two players continuously, retain them in the l
 ## Acceptance scenarios
 
 1. No website is open: entry starts recording. A second participant joins the same run.
-2. A participant returns before departure finalization: the same participation continues.
-3. Both disappear and complete the absence windows. One final point inside the endpoint means Win; neither inside means Loss, even after an earlier endpoint visit.
+2. A missing participant returns within five minutes away from the start sphere: the same participation continues, with invisibility annotations.
+3. Both are observed outside. One final dungeon point inside the endpoint means Win; neither inside means Loss. Missing without outside evidence for five minutes means Interrupted.
 4. Positions exactly on the sphere qualify; positions outside it or in another world do not. A point five blocks horizontally and five blocks vertically from the center is outside a 10-block-diameter sphere.
 5. Moving the endpoint during a run affects the next run, not the current or historical outcome.
-6. A feed outage cancels a departure countdown. Recovery requires a fresh absence window. Restart or 60-second tracking interruption preserves an Interrupted recording.
+6. A feed outage preserves the missing timer. Restart or 60-second tracking interruption preserves an Interrupted recording.
 7. Alice encounters a marker; her return and Bob's later arrival do not animate it again. A new run can animate it.
 8. Replay reproduces first encounters once. Scrubbing does not animate them; restart permits them again.
 9. Co-op participants join at different times: playback preserves their timing and supports following either across floors.

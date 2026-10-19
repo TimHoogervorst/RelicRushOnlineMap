@@ -3,6 +3,10 @@ const storageKey = 'rr-map-welcome-seen-v1';
 let seen = false;
 try { seen = localStorage.getItem(storageKey) === 'true'; } catch { /* Storage is optional. */ }
 if (!seen) welcome.showModal();
+document.querySelector('#welcome-open').addEventListener('click', () => {
+  document.querySelector('#copy-server-status').textContent = '';
+  if (!welcome.open) welcome.showModal();
+});
 function rememberVisit() {
   try { localStorage.setItem(storageKey, 'true'); } catch { /* Still allow access to the map. */ }
 }

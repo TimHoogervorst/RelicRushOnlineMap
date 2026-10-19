@@ -87,10 +87,19 @@ export async function limitedResponse(response, maximum) {
 }
 
 export function createPlayerTracker({ fetcher = fetch, now = Date.now } = {}) {
-  let players = [], updatedAt = null, attemptedAt = -Infinity, pending, failed = false, assignments = new Map(), diagnosticAssignments = new Map();
-  async function refresh() {
+  let players = [], updatedAt = null, attemptedAt = -Infinity, pending, failed = false, emptySince = null, assignments = new Map(), diagnosticAssignments = new Map();
+  let recordingActive = false;
+  function pollingInterval(manifest) {
+    if (recordingActive || updatedAt === null) return 1000;
+    const located = locatePlayers(players, trackingSections(manifest), assignments, manifest.trackingSettings).located;
+    // Ambiguous positions inside overlapping dungeon regions still need fast updates.
+    if (located.some(player => player.status !== 'outside')) return 1000;
+    if (players.length) return 15000;
+    return emptySince !== null && now() - emptySince >= 60 * 60 * 1000 ? 60000 : 30000;
+  }
+  async function refresh(manifest) {
     if (pending) return pending;
-    if (now() - attemptedAt < 2000) return;
+    if (now() - attemptedAt < pollingInterval(manifest)) return;
     attemptedAt = now();
     pending = (async () => {
       try {
@@ -104,21 +113,25 @@ export function createPlayerTracker({ fetcher = fetch, now = Date.now } = {}) {
           seen.add(uuid); return { uuid, name: p.name, world: p.world, x: p.x, y: p.y, z: p.z };
         });
         players = next; updatedAt = now(); failed = false;
-      } catch { failed = true; }
+        emptySince = players.length ? null : (emptySince ?? updatedAt);
+      } catch { failed = true; emptySince = null; }
       finally { pending = null; }
     })();
     return pending;
   }
   return {
     async snapshot(manifest, diagnostics = false, observations = false) {
-      await refresh();
-      const expired = updatedAt === null || now() - updatedAt >= STALE_MS;
+      await refresh(manifest);
+      const pollIntervalMs = pollingInterval(manifest);
+      const expiresAfterMs = players.length ? STALE_MS : Math.max(STALE_MS, pollIntervalMs + 5000);
+      const expired = updatedAt === null || now() - updatedAt >= expiresAfterMs;
       const sections = trackingSections(manifest);
       const result = locatePlayers(expired ? [] : players, sections, diagnostics ? diagnosticAssignments : assignments, manifest.trackingSettings);
       if (diagnostics) diagnosticAssignments = result.assignments;
       else assignments = result.assignments;
-      return { updatedAt, ageMs: updatedAt === null ? null : Math.max(0, now() - updatedAt), stale: failed || expired, expired, players: result.located.filter(p => p.status === 'mapped'), ...(observations ? { observations: result.located } : {}), ...(diagnostics ? { diagnostics: result.located, worlds: [...new Set(players.map(p => p.world))], trackingSettings: manifest.trackingSettings ?? DEFAULT_REACH, trackerOverlaps: trackerOverlaps(sections, manifest.trackingSettings), overlaps: overlappingRegions(sections) } : {}) };
+      return { updatedAt, pollIntervalMs, ageMs: updatedAt === null ? null : Math.max(0, now() - updatedAt), stale: failed || expired, expired, players: result.located.filter(p => p.status === 'mapped'), ...(observations ? { observations: result.located } : {}), ...(diagnostics ? { diagnostics: result.located, worlds: [...new Set(players.map(p => p.world))], trackingSettings: manifest.trackingSettings ?? DEFAULT_REACH, trackerOverlaps: trackerOverlaps(sections, manifest.trackingSettings), overlaps: overlappingRegions(sections) } : {}) };
     },
+    setRecordingActive(active) { recordingActive = Boolean(active); },
     knows(uuid) { return players.some(p => p.uuid === uuid); }
   };
 }

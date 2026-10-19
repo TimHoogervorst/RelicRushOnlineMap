@@ -178,6 +178,7 @@ const markerType = id => markerTypes().find(type => type.id === id) ?? builtInMa
 const legacyIcons = { chest: 'minecraft:chest', relic: 'minecraft:diamond', shop: 'minecraft:emerald', stairs: 'minecraft:oak_stairs', other: 'minecraft:compass' };
 const inventoryIcon = icon => {
   const normalized = legacyIcons[icon] ?? icon;
+  if (normalized === 'minecraft:chest') return '/api/item-icon?id=minecraft%3Airon_block';
   return typeof normalized === 'string' && normalized.startsWith('minecraft:') ? `/api/item-icon?id=${encodeURIComponent(normalized)}` : `/icons/${encodeURIComponent(normalized)}.svg`;
 };
 let minecraftItemIcons = [];

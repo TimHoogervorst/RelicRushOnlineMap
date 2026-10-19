@@ -20,6 +20,7 @@ export function replayPosition(samples, time) {
   if (a.unavailable) return null;
   if (!b || time === a.time) return a;
   if (b.unavailable) return a;
+  if (b.invisibility) return null;
   if (a.floorId !== b.floorId) return { ...a, transition: { floorId: b.floorId, floorName: b.floorName, sectionName: b.sectionName } };
   const t = (time - a.time) / (b.time - a.time);
   // Interpolate in floor coordinates: separate sections have independent local origins.
@@ -32,7 +33,7 @@ export function routeSegments(samples, sectionIds) {
   const segments = []; let current = null, previous;
   for (const sample of samples) {
     if (sample.unavailable || !sectionIds.has(sample.sectionId)) { current = null; previous = sample; continue; }
-    if (!current || previous?.floorId !== sample.floorId) { current = []; segments.push(current); }
+    if (!current || sample.invisibility || previous?.floorId !== sample.floorId) { current = []; segments.push(current); }
     current.push(sample); previous = sample;
   }
   return segments;
@@ -42,7 +43,11 @@ export function routeAnnotations(samples, status) {
   const annotations = [];
   for (let i = 1; i < samples.length; i++) {
     const from = samples[i - 1], to = samples[i];
-    if (!from.unavailable && !to.unavailable && from.floorId !== to.floorId) annotations.push({ kind: 'exit', sample: from, destination: to });
+    if (to.invisibility) {
+      if (!from.unavailable) annotations.push({ kind: 'invisibility-start', sample: from, destination: to.unavailable ? null : to, durationMs: to.invisibility.durationMs });
+      if (!to.unavailable) annotations.push({ kind: 'invisibility-end', sample: to, destination: from.unavailable ? null : from, durationMs: to.invisibility.durationMs });
+    }
+    if (!to.invisibility && !from.unavailable && !to.unavailable && from.floorId !== to.floorId) annotations.push({ kind: 'exit', sample: from, destination: to });
   }
   const last = samples.at(-1);
   if (status === 'loss' && last && !last.unavailable) annotations.push({ kind: 'loss', sample: last });

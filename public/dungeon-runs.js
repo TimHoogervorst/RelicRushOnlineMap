@@ -1,3 +1,4 @@
+import { mountRunStartpoint } from './run-startpoint.js';
 import { durationLabel, indexRecording, replayPosition, routeSegments, routeAnnotations } from './run-playback.js';
 
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -24,6 +25,7 @@ export function mountDungeonRuns(hooks, panel) {
     <p class="run-status" role="status"></p><div class="run-results"></div><button type="button" class="run-more" hidden>Show 10 more</button></details>
     <section class="run-replay" hidden aria-label="Run replay"><h3>Replay</h3><p class="run-title"></p><p class="run-gap" role="status"></p><div class="run-actions"><button type="button" class="run-play">Play</button><button type="button" class="run-restart">Restart</button></div><label>Timeline<input class="run-timeline" type="range" min="0" value="0" step="100" aria-label="Replay position"></label><output class="run-clock"></output><div class="run-actions"><label>Speed<select class="run-speed">${[0.5, 1, 2, 4, 8].map(v => `<option${v === 1 ? ' selected' : ''}>${v}</option>`).join('')}</select></label><label>Follow<select class="run-follow"><option value="">Free camera</option></select></label></div><button type="button" class="run-exit">Back to live</button></section>`;
   panel.append(area);
+  const startpointEditor = mountRunStartpoint(hooks);
   const $ = selector => area.querySelector(selector);
   $('.run-timezone').textContent = `Times in ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
   const overlay = document.createElementNS(svgNS, 'svg'); overlay.id = 'run-routes'; overlay.setAttribute('aria-hidden', 'true');
@@ -168,9 +170,10 @@ export function mountDungeonRuns(hooks, panel) {
     const state = hooks.state(), floor = state.floor, dt = lastFrame === null ? 0 : Math.min(1000, time - lastFrame); lastFrame = time;
     editor.hidden = !state.editing; place.hidden = !state.editing;
     if (state.editing !== wasEditing) { wasEditing = state.editing; renderResults(); }
-    if (!floor) return;
+    if (!floor) { startpointEditor.draw(state, () => null); return; }
     const pixels = floor.renderer?.pixelSize ?? 16, sections = new Map((floor.sections ?? []).map(s => [s.id, s]));
     const display = sample => { if (sample.display) return sample.floorId === floor.id ? sample.display : null; const section = sections.get(sample.sectionId); return section ? { x: section.placementX + sample.local.x, z: section.placementZ + sample.local.z } : null; };
+    startpointEditor.draw(state, display);
     const visibleEndpoint = recording ? recording.endpoint : endpoint, ep = visibleEndpoint && display(visibleEndpoint);
     endpointNode.hidden = !ep || (!state.editing && !recording);
     if (ep) { endpointNode.style.left = `${ep.x * pixels}px`; endpointNode.style.top = `${(floor.bounds.depth - ep.z) * pixels}px`; endpointNode.style.transform = `translate(-50%,-50%) scale(${1 / state.zoom})`; }
@@ -207,11 +210,37 @@ export function mountDungeonRuns(hooks, panel) {
         for (const annotation of routeAnnotations(samples, recording.status)) {
           const point = display(annotation.sample); if (!point) continue;
           const isExit = annotation.kind === 'exit';
-          const label = isExit ? `${participant.name} → ${annotation.destination.floorName ?? annotation.destination.floorId} · ${annotation.destination.sectionName ?? annotation.destination.sectionId}` : `${participant.name} · Last known position`;
-          const node = document.createElement('div'); node.className = `run-annotation run-${annotation.kind}-marker`; node.title = label; node.setAttribute('aria-label', label);
-          const icon = document.createElement('span'); icon.className = 'run-annotation-icon'; icon.textContent = isExit ? '↗' : '×';
+          const invisible = annotation.kind.startsWith('invisibility-');
+          const label = invisible ? `${participant.name} / ${annotation.kind === 'invisibility-start' ? 'Last seen' : 'Reappeared'} / ${new Date(annotation.sample.time).toLocaleString()} / Invisibility: ${durationLabel(annotation.durationMs)}` : isExit ? `${participant.name} → ${annotation.destination.floorName ?? annotation.destination.floorId} · ${annotation.destination.sectionName ?? annotation.destination.sectionId}` : `${participant.name} · Last known position`;
+          const destination = annotation.destination;
+          if (annotation.kind === 'invisibility-start' && destination?.floorId === floor.id) {
+            const end = display(destination);
+            if (end) {
+              const line = document.createElementNS(svgNS, 'polyline'); line.classList.add('run-invisibility-link');
+              line.setAttribute('points', `${point.x * pixels},${(floor.bounds.depth - point.z) * pixels} ${end.x * pixels},${(floor.bounds.depth - end.z) * pixels}`);
+              line.setAttribute('vector-effect', 'non-scaling-stroke'); overlay.append(line);
+            }
+          }
+          const canNavigate = destination && !destination.unavailable && destination.floorId !== floor.id;
+          const node = document.createElement(canNavigate ? 'button' : 'div'); node.className = `run-annotation run-${annotation.kind}-marker`; node.title = label; node.setAttribute('aria-label', label);
+          const icon = document.createElement('span'); icon.className = 'run-annotation-icon'; icon.textContent = invisible ? '?' : isExit ? '↗' : '×';
           const text = document.createElement('span'); text.textContent = label; node.append(icon, text);
           node.style.left = `${point.x * pixels}px`; node.style.top = `${(floor.bounds.depth - point.z) * pixels}px`;
+          if (canNavigate) {
+            node.type = 'button'; node.classList.add('run-annotation-link');
+            const targetLabel = `${destination.floorName ?? destination.floorId} / ${destination.sectionName ?? destination.sectionId}`;
+            text.textContent += ` / Go to ${targetLabel}`;
+            node.title = `${label} / Go to ${targetLabel}`; node.setAttribute('aria-label', node.title);
+            node.addEventListener('pointerdown', event => event.stopPropagation());
+            node.addEventListener('click', async event => {
+              event.stopPropagation(); playing = false; $('.run-play').textContent = 'Play'; $('.run-follow').value = '';
+              elapsed = destination.time - recording.startedAt;
+              try {
+                await hooks.navigate(destination.floorId);
+                if (destination.display) hooks.center(destination.display);
+              } catch (error) { report(error); }
+            });
+          }
           annotations.append(node);
         }
         index++;
@@ -237,7 +266,8 @@ export function mountDungeonRuns(hooks, panel) {
   }
   async function poll() {
     try {
-      const data = await request('/api/runs/live'); endpoint = data.endpoint;
+      const data = await request('/api/runs/live'); endpoint = data.endpoint; startpointEditor.update(data.startpoint ?? null);
+      hooks.presence?.(data.active);
       if (!draft && !endpointDirty && !editor.querySelector('form').contains(document.activeElement)) renderEndpointForm(endpoint);
       $('.run-live').textContent = data.active ? `Recording · ${data.active.participants.map(p => p.name).join(' + ')} · ${durationLabel(data.active.durationMs)}` : 'Ready for the next run';
       const recentKeys = new Set(data.encounters.map(e => `${e.runId}:${e.markerId}`));
