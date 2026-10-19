@@ -1,5 +1,5 @@
 import { editTrackerPoints, trackerState, writeTrackerState } from './tracker-points.js';
-import { activeRun, summarizeRun, readEndpoint, saveEndpoint, listRuns, runDetail, deleteRun } from './dungeon-runs.js';
+import { activeRun, summarizeRun, readEndpoint, saveEndpoint, readStartpoint, saveStartpoint, listRuns, runDetail, deleteRun } from './dungeon-runs.js';
 import { createRunRecorder } from './run-recorder.js';
 import { listItemIcons, renderItemIcon } from './item-icons.js';
 import { createPlayerTracker, saveCalibration, trackingSections, overlappingRegions } from './player-tracking.js';
@@ -100,7 +100,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     failures.delete(key);
     const token = randomBytes(32).toString('base64url');
     sessions.set(token, { expires: Date.now() + sessionDurationMs });
-    res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionDurationMs / 1000)}${secureCookies || req.secure ? '; Secure' : ''}`).json({ authenticated: true });
+    res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionDurationMs / 1000)}${secureCookies || req.secure ? '; Secure' : ''}`).json({ authenticated: true, secureCookie: secureCookies || req.secure });
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   const iconRoots = [path.join(dataDir, 'assets', 'resource-pack'), minecraftAssetsDir];
@@ -156,7 +156,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.get('/api/runs/live', withRuns((_req, res, db) => {
     const run = activeRun(db);
     const encounters = db.prepare('SELECT run_id,value FROM run_encounters WHERE time>=? ORDER BY time').all(Date.now() - 8000).map(row => ({ runId: row.run_id, ...JSON.parse(row.value) }));
-    res.set('Cache-Control', 'no-store').json({ active: run ? summarizeRun(run) : null, endpoint: readEndpoint(db), encounters });
+    res.set('Cache-Control', 'no-store').json({ active: run ? summarizeRun(run) : null, endpoint: readEndpoint(db), startpoint: readStartpoint(db), encounters });
   }));
   app.get('/api/runs/:id', withRuns((req, res, db) => {
     const run = runDetail(db, req.params.id);
@@ -168,6 +168,12 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     try {
       const manifest = await generation.currentManifest();
       withRuns((_req, response, db) => response.json({ endpoint: saveEndpoint(db, req.body.endpoint, manifest) }))(req, res);
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+  app.put('/api/project/run-startpoint', async (req, res) => {
+    try {
+      const manifest = await generation.currentManifest();
+      withRuns((_req, response, db) => response.json({ startpoint: saveStartpoint(db, req.body.startpoint, manifest) }))(req, res);
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
   app.get('/api/players', async (_req, res) => {

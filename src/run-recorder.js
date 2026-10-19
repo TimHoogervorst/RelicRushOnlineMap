@@ -15,7 +15,8 @@ export function createRunRecorder({ database, tracker, manifest, paused = () => 
       try {
         if (!recovered) { interruptRuns(db, now()); recovered = true; }
         if (!snapshot.stale && snapshot.updatedAt === lastObservation && !activeRun(db)) return;
-        recordObservation(db, snapshot, map, now());
+        const run = recordObservation(db, snapshot, map, now());
+        tracker.setRecordingActive?.(run?.status === 'active');
         if (!snapshot.stale) lastObservation = snapshot.updatedAt;
       } finally { db.close(); }
     })();
@@ -24,8 +25,8 @@ export function createRunRecorder({ database, tracker, manifest, paused = () => 
   }
   return {
     tick,
-    start() { if (!timer) { void tick(); timer = setInterval(() => void tick(), 2000); timer.unref(); } },
-    async stop() { clearInterval(timer); timer = null; epoch++; await pending; },
-    reset() { epoch++; recovered = false; lastObservation = null; }
+    start() { if (!timer) { void tick(); timer = setInterval(() => void tick(), 1000); timer.unref(); } },
+    async stop() { clearInterval(timer); timer = null; epoch++; await pending; tracker.setRecordingActive?.(false); },
+    reset() { tracker.setRecordingActive?.(false); epoch++; recovered = false; lastObservation = null; }
   };
 }

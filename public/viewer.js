@@ -178,6 +178,7 @@ const markerType = id => markerTypes().find(type => type.id === id) ?? builtInMa
 const legacyIcons = { chest: 'minecraft:chest', relic: 'minecraft:diamond', shop: 'minecraft:emerald', stairs: 'minecraft:oak_stairs', other: 'minecraft:compass' };
 const inventoryIcon = icon => {
   const normalized = legacyIcons[icon] ?? icon;
+  if (normalized === 'minecraft:chest') return '/api/item-icon?id=minecraft%3Airon_block';
   return typeof normalized === 'string' && normalized.startsWith('minecraft:') ? `/api/item-icon?id=${encodeURIComponent(normalized)}` : `/icons/${encodeURIComponent(normalized)}.svg`;
 };
 let minecraftItemIcons = [];
@@ -1228,7 +1229,15 @@ document.querySelector('#login-form').addEventListener('submit', async event => 
   const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) });
   const result = await response.json();
   status.textContent = response.ok ? '' : result.error;
-  if (response.ok) { document.querySelector('#editor-password').value = ''; await refreshSession(); }
+  if (response.ok) {
+    document.querySelector('#editor-password').value = '';
+    try {
+      await refreshSession();
+      if (!editorAuthenticated) status.textContent = result.secureCookie && window.location.protocol !== 'https:'
+        ? 'Login requires an HTTPS session cookie, but this page uses HTTP. Open the HTTPS address, or set COOKIE_SECURE=false for this HTTP deployment and recreate the container.'
+        : 'Your password was accepted, but the browser did not retain the login session. Check that cookies are allowed and try again.';
+    } catch (error) { status.textContent = `Could not verify login: ${error.message}`; }
+  }
 });
 document.querySelector('#logout').addEventListener('click', async () => {
   await fetch('/api/auth/logout', { method: 'POST' });

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { openProject, projectRevision } from '../src/project-store.js';
-import { recordObservation, runDetail, listRuns, deleteRun, activeRun, interruptRuns, saveEndpoint, readEndpoint, qualifies } from '../src/dungeon-runs.js';
+import { recordObservation, runDetail, listRuns, deleteRun, activeRun, interruptRuns, saveEndpoint, readEndpoint, saveStartpoint, readStartpoint, summarizeRun, qualifies } from '../src/dungeon-runs.js';
 import { createRunRecorder } from '../src/run-recorder.js';
 import { createApp } from '../src/server.js';
 import { createProjectBackup, restoreProjectBackup } from '../src/backup-service.js';
@@ -15,7 +15,7 @@ const calibration = { world: 'world', local: { x: 0, y: 0, z: 0 }, actual: { x: 
 const manifest = { floors: [{ id: 'f', sections: [{ id: 's', calibration, trackingOrientation: [1, 0, 0, 1] }], markers: [{ id: 'm', name: 'Relic', sectionId: 's', localX: 0, localZ: 0 }] }] };
 const player = (uuid = 'a'.repeat(32), x = 0) => ({ uuid, name: uuid[0] === 'a' ? 'Alice' : 'Bob', status: 'mapped', world: 'world', sectionId: 's', floorId: 'f', x, y: 1, z: 0, local: { x, y: 1, z: 0 } });
 const observe = (db, time, players, stale = false) => recordObservation(db, { updatedAt: time, observations: players, stale }, manifest, time);
-function finish(db, time) { observe(db, time, []); return observe(db, time + 16000, []); }
+function finish(db, time) { const ended = observe(db, time, activeRun(db).participants.map(p => ({ uuid: p.uuid, status: 'outside' }))); observe(db, time + 16000, []); return ended; }
 function endpoint(db, x = 0) { return saveEndpoint(db, { sectionId: 's', local: { x, y: 1, z: 0 } }, manifest); }
 
 test('co-op shares a win from either final point, snapshots endpoint and excludes departure grace from duration', () => {
@@ -77,7 +77,7 @@ test('re-entry cancels absence; finalized players and third arrivals cannot join
     const a = player(), b = player('b'.repeat(32), 20), c = player('c'.repeat(32));
     observe(db, 1000, [a, b, c]); observe(db, 3000, [b]); observe(db, 16000, [a, b]);
     assert.equal(activeRun(db).participants.length, 2); assert.equal(activeRun(db).participants[0].finished, false);
-    observe(db, 18000, [b]); observe(db, 34000, [b]);
+    observe(db, 18000, [b, { ...a, status: 'outside' }]); observe(db, 34000, [b]);
     assert.equal(activeRun(db).participants[0].finished, true);
     observe(db, 36000, [a, b, c]);
     assert.equal(activeRun(db).participants[0].lastAt, 16000);
@@ -85,12 +85,12 @@ test('re-entry cancels absence; finalized players and third arrivals cannot join
   } finally { db.close(); }
 });
 
-test('outages reset absence and ambiguity interrupts after 60 seconds without fabricating deaths', () => {
+test('outages preserve absence and ambiguity interrupts after 60 seconds without fabricating deaths', () => {
   const db = openProject(':memory:');
   try {
     const a = player(); observe(db, 1000, [a]); observe(db, 3000, []); observe(db, 15000, [], true);
-    observe(db, 19000, []); assert.equal(activeRun(db).participants[0].absentSince, 19000);
-    observe(db, 33000, []); assert.ok(activeRun(db)); observe(db, 35000, []); assert.equal(activeRun(db), null);
+    observe(db, 19000, []); assert.equal(activeRun(db).participants[0].absentSince, 3000);
+    observe(db, 33000, []); assert.ok(activeRun(db)); observe(db, 35000, [{ ...a, status: 'outside' }]); assert.equal(activeRun(db), null);
     const run = observe(db, 37000, [a]); observe(db, 39000, [{ ...a, status: 'ambiguous' }]);
     observe(db, 98000, [{ ...a, status: 'ambiguous' }]); assert.ok(activeRun(db));
     observe(db, 99000, [{ ...a, status: 'ambiguous' }]); assert.equal(runDetail(db, run.id).status, 'interrupted');
@@ -197,4 +197,69 @@ test('public history API, authenticated deletion, head lookup, and full backup r
   db = openProject(path.join(dataDir, 'project.sqlite'));
   try { assert.equal(runDetail(db, run.id).status, 'win'); assert.ok(readEndpoint(db)); }
   finally { db.close(); }
+});
+
+
+test('missing runners remain active for five minutes and return with annotated, unconnected replay contacts', () => {
+  const db = openProject(':memory:');
+  try {
+    const a = player(), run = observe(db, 1000, [a]);
+    observe(db, 2000, []);
+    assert.equal(summarizeRun(activeRun(db)).participants[0].missingSince, 2000);
+    observe(db, 240000, []); assert.equal(activeRun(db).id, run.id);
+    observe(db, 250000, [player(a.uuid, 20)]);
+    assert.equal(summarizeRun(activeRun(db)).participants[0].missingSince, null);
+    const samples = runDetail(db, run.id).samples;
+    assert.equal(samples[1].invisibility.durationMs, 249000);
+    assert.equal(replayPosition(samples, 100000), null);
+    assert.equal(routeSegments(samples, new Set(['s'])).length, 2);
+    assert.deepEqual(routeAnnotations(samples, 'active').map(a => a.kind), ['invisibility-start', 'invisibility-end']);
+    observe(db, 251000, [{ ...a, status: 'outside' }]);
+    assert.equal(activeRun(db), null);
+    assert.equal(runDetail(db, run.id).endedAt, 250000);
+  } finally { db.close(); }
+});
+
+test('missing timeout interrupts at the last contact and clears sidebar presence', () => {
+  const db = openProject(':memory:');
+  try {
+    endpoint(db);
+    const run = observe(db, 1000, [player()]); observe(db, 2000, []);
+    observe(db, 301999, []); assert.ok(activeRun(db));
+    const ended = observe(db, 302000, []);
+    assert.equal(activeRun(db), null); assert.equal(ended.status, 'interrupted');
+    assert.equal(summarizeRun(ended).participants[0].missingSince, null);
+    assert.equal(runDetail(db, run.id).durationMs, 0);
+  } finally { db.close(); }
+});
+
+test('returning at the saved start or a replacement player starts a fresh shared run', () => {
+  const db = openProject(':memory:');
+  try {
+    const start = saveStartpoint(db, { sectionId: 's', local: { x: 0, y: 1, z: 0 }, diameter: 4 }, manifest);
+    assert.deepEqual(readStartpoint(db), start);
+    const a = player(), b = player('b'.repeat(32)), first = observe(db, 1000, [a]);
+    observe(db, 2000, [a]); assert.equal(activeRun(db).id, first.id);
+    observe(db, 3000, []); const second = observe(db, 4000, [a]);
+    assert.notEqual(second.id, first.id); assert.equal(runDetail(db, first.id).status, 'interrupted');
+    observe(db, 5000, []); const third = observe(db, 6000, [b]);
+    assert.notEqual(third.id, second.id);
+    assert.deepEqual(third.participants.map(p => p.uuid), [b.uuid]);
+    assert.equal(runDetail(db, second.id).status, 'interrupted');
+    assert.equal(summarizeRun(third).participants[0].missingSince, null);
+    saveStartpoint(db, null, manifest); assert.equal(readStartpoint(db), null);
+  } finally { db.close(); }
+});
+
+
+test('invisibility annotations link both contacts across floors, without linking deleted destinations', () => {
+  const from = { time: 1000, floorId: 'lower', sectionId: 'a', local: { x: 0, z: 0 } };
+  const to = { time: 10000, floorId: 'upper', sectionId: 'b', local: { x: 5, z: 5 }, invisibility: { durationMs: 9000 } };
+  const annotations = routeAnnotations([from, to], 'active');
+  assert.equal(annotations[0].destination, to);
+  assert.equal(annotations[1].destination, from);
+  assert.equal(annotations[0].sample.time, 1000);
+  assert.equal(annotations[1].sample.time, 10000);
+  assert.equal(replayPosition([from, to], 5000), null);
+  assert.equal(routeAnnotations([from, { ...to, unavailable: true }], 'active')[0].destination, null);
 });

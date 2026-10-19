@@ -7,7 +7,7 @@ const head = uuid => { const img = document.createElement('img'); img.alt = ''; 
 
 export function mountPlayerTracking(hooks) {
   const panel = document.createElement('aside'); panel.className = 'players-panel'; panel.setAttribute('aria-label', 'Live Minecraft players');
-  panel.innerHTML = `<details open><summary>Players <span id="player-count">0</span></summary><p id="players-status" role="status">Connecting…</p><div id="player-follow" hidden><span></span><button type="button">Stop</button></div><div id="player-list"></div></details>`;
+  panel.innerHTML = `<details open><summary>Players <span id="player-count">0</span></summary><p id="players-status" role="status">Connecting…</p><div id="player-follow" hidden><span></span><button type="button">Stop</button></div><div id="player-list"></div><div id="missing-player-list"></div></details>`;
   document.body.append(panel);
   const layer = document.createElement('div'); layer.id = 'player-layer'; $('#map-frame').append(layer);
   const waypoints = document.createElement('div'); waypoints.id = 'waypoint-layer'; $('#map-frame').append(waypoints);
@@ -26,22 +26,31 @@ export function mountPlayerTracking(hooks) {
     $('#waypoint-region').insertAdjacentHTML('beforeend', `<div class="tracking-coordinates"><label>Min ${axis.toUpperCase()}<input id="waypoint-min-${axis}" type="number" step="1" min="-30000000" max="30000000"></label><label>Max ${axis.toUpperCase()}<input id="waypoint-max-${axis}" type="number" step="1" min="-30000000" max="30000000"></label></div>`);
   }
   const add = document.createElement('button'); add.type = 'button'; add.id = 'cell-add-waypoint'; add.textContent = '+ Waypoint'; $('#cell-popup').append(add);
+  let missingPlayers = [], liveRun = null, followedRunId = null, followedPlayer = null;
   let players = [], sections = [], local = null, editingRevision = null, lastSuccess = 0, received = 0, following = null, navigation = 0, switching = false, stale = false, notice = '', disposed = false, wasEditing = false;
   const trackers = mountTrackerPoints({ ...hooks, follow: player => void follow(player, true) }, editor, panel, refreshEditor);
-  const runs = mountDungeonRuns({ ...hooks, stopLive: () => stop() }, panel);
+  const runs = mountDungeonRuns({ ...hooks, stopLive: () => stop(), presence: run => {
+    liveRun = run;
+    missingPlayers = (run?.participants ?? []).filter(p => p.missingSince != null);
+    const participant = run?.participants.find(p => p.uuid === following);
+    if (following && ((followedRunId && followedRunId !== run?.id) || participant?.finished)) stop('Run ended / following stopped.');
+    else if (participant) followedRunId = run.id;
+    renderList();
+  } }, panel);
   const icons = new Map(), rows = new Map(), movement = new Map();
-  function stop(reason = '') { following = null; navigation++; switching = false; notice = reason; updateFollow(); }
+  function stop(reason = '') { following = null; followedRunId = null; followedPlayer = null; navigation++; switching = false; notice = reason; updateFollow(); }
   function updateFollow() {
-    const player = players.find(p => p.uuid === following);
+    const visible = players.find(p => p.uuid === following);
+    const player = visible ?? followedPlayer;
     $('#player-follow').hidden = !player;
-    $('#player-follow span').textContent = player ? `Following ${player.name}` : '';
+    $('#player-follow span').textContent = player ? `Following ${player.name}${visible ? '' : ' / waiting for position'}` : '';
     for (const [uuid, row] of rows) row.setAttribute('aria-pressed', String(uuid === following));
     if (notice) $('#players-status').textContent = notice;
   }
   $('#player-follow button').addEventListener('click', () => stop('Following stopped.'));
   async function follow(player, initial = false) {
     if (runs.replaying) return;
-    const token = ++navigation; following = player.uuid; notice = ''; updateFollow();
+    const token = ++navigation; following = player.uuid; followedPlayer = player; followedRunId = liveRun?.participants.some(p => p.uuid === player.uuid) ? liveRun.id : null; notice = ''; updateFollow();
     try {
       if (hooks.state().floor?.id !== player.floorId) {
         switching = true;
@@ -83,7 +92,18 @@ export function mountPlayerTracking(hooks) {
         if (img.dataset.version !== headVersion) { img.dataset.version = headVersion; img.src = `/api/players/${player.uuid}/head?v=${headVersion}`; }
       }
     }
-    $('#player-count').textContent = String(players.length);
+    const missing = missingPlayers.filter(p => !active.has(p.uuid));
+    $('#missing-player-list').replaceChildren(...missing.map(player => {
+      const row = document.createElement('div'); row.className = 'player-row player-missing';
+      const portrait = document.createElement('span'); portrait.className = 'player-missing-portrait';
+      const badge = document.createElement('img'); badge.src = '/ui/invisibility.png'; badge.alt = 'Invisibility'; badge.className = 'player-invisibility-icon';
+      portrait.append(head(player.uuid), badge);
+      const label = document.createElement('span'), name = document.createElement('strong'), status = document.createElement('small');
+      name.textContent = player.name; status.textContent = `Invisibility / last seen ${new Date(player.lastAt).toLocaleTimeString()}`;
+      row.title = 'Invisibility. Waiting up to five minutes for a new position.';
+      label.append(name, status); row.append(portrait, label); return row;
+    }));
+    $('#player-count').textContent = String(players.length + missing.length);
     layer.classList.toggle('stale', stale);
     $('#players-status').textContent = notice || (stale ? 'Positions stale · reconnecting…' : players.length ? 'Live · updates every 2 seconds' : 'No players in calibrated sections.');
     updateFollow();
@@ -113,7 +133,7 @@ export function mountPlayerTracking(hooks) {
     if (editing && !wasEditing && window.matchMedia('(max-width: 600px)').matches) panel.querySelector('details').open = false;
     wasEditing = editing;
     const expired = !lastSuccess || Date.now() - lastSuccess >= 15000;
-    if (expired && players.length) { players = []; stop('Tracking unavailable · positions expired.'); renderList(); }
+    if (expired && players.length) { players = []; notice = 'Tracking unavailable / waiting for position.'; renderList(); }
     for (const player of players) {
       const icon = icons.get(player.uuid); if (!icon) continue;
       icon.hidden = floor?.id !== player.floorId || switching;
@@ -136,7 +156,7 @@ export function mountPlayerTracking(hooks) {
       // Positions belong to a particular published layout; refresh before drawing a newer layout.
       if (hooks.state().floor && data.projectRevision !== hooks.state().floor.projectRevision) { movement.clear(); await hooks.refreshMap(); }
       lastSuccess = data.ageMs === null ? 0 : Date.now() - data.ageMs; stale = data.stale;
-      if (notice === 'Tracking unavailable · reconnecting…' || notice === 'Tracking unavailable · positions expired.') notice = '';
+      if (notice === 'Tracking unavailable / waiting for position.' || notice === 'Tracking unavailable · reconnecting…' || notice === 'Tracking unavailable · positions expired.') notice = '';
       const time = performance.now();
       if (data.updatedAt !== received) {
         for (const player of data.players) {
@@ -148,13 +168,13 @@ export function mountPlayerTracking(hooks) {
       players = data.players;
       if (following && !runs.replaying) {
         const target = players.find(p => p.uuid === following);
-        if (!target) stop(data.expired ? 'Positions expired · following stopped.' : 'Player left the mapped area or is no longer locatable.');
-        else if (!switching && target.floorId !== hooks.state().floor?.id) void follow(target);
+        if (target) followedPlayer = target;
+        if (target && !switching && target.floorId !== hooks.state().floor?.id) void follow(target);
       }
       renderList();
     } catch { stale = true; notice = 'Tracking unavailable · reconnecting…'; renderList(); }
     if (hooks.state().editing) await refreshEditor().catch(error => { trackers.unavailable(); $('#tracking-diagnostics').textContent = error.message; });
-    if (!disposed) setTimeout(poll, 2000);
+    if (!disposed) setTimeout(poll, 1000);
   }
 
   function populate(section) {

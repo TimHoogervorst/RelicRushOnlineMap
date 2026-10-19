@@ -77,6 +77,7 @@ test('session expiration and Secure cookie configuration are enforced', async t 
   const { origin } = await fixture(t, { sessionDurationMs: 1000, secureCookies: true });
   const login = await fetch(`${origin}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ password: 'secret' }) });
   assert.match(login.headers.get('set-cookie'), /Secure/);
+  assert.equal((await login.json()).secureCookie, true, 'Client can explain HTTPS-only cookies on HTTP');
   const cookie = login.headers.get('set-cookie').split(';')[0];
   await new Promise(resolve => setTimeout(resolve, 1020));
   assert.deepEqual(await fetch(`${origin}/api/auth/session`, { headers: { cookie } }).then(response => response.json()), { authenticated: false });

@@ -224,15 +224,15 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 .players-panel { padding: 10px; }
 .sidebar h2, .sidebar h3, .players-panel summary, .editor-section > summary, .run-date-heading, .run-replay h3 { color: var(--ui-text); font-family: 'DM Mono', monospace; text-shadow: 2px 2px #111; }
 .sidebar p, .sidebar label, .run-panel label, .run-panel small, .run-status, .run-live, .run-gap, #players-status, .player-row small { color: var(--ui-muted); }
-button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close), select {
+button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):not(.run-annotation-link), select {
   border: 3px solid transparent; border-image: url('/ui/widget-button.png') 3 fill / 3px / 0 stretch;
   border-radius: 0; background: #777; color: var(--ui-text); text-shadow: 1px 2px #292929;
   image-rendering: pixelated; box-shadow: 1px 2px #0008; font-family: 'DM Mono', monospace; transition: none;
 }
-button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):is(:hover, :focus-visible), select:is(:hover, :focus-visible) {
+button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):not(.run-annotation-link):is(:hover, :focus-visible), select:is(:hover, :focus-visible) {
   border-image-source: url('/ui/widget-button_highlighted.png'); color: #ffffa0; background: #888;
 }
-button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):active { translate: 0 1px; box-shadow: none; }
+button:not(.map-marker):not(.player-head):not(.calibration-waypoint):not(.tracker-point):not(.minecraft-close):not(.run-annotation-link):active { translate: 0 1px; box-shadow: none; }
 button:disabled { border-image: url('/ui/widget-button_disabled.png') 1 fill / 3px / 0 stretch !important; color: #aaa !important; text-shadow: 1px 1px #222; cursor: not-allowed; }
 button:focus-visible, select:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 select { padding: 5px 8px; }
@@ -310,3 +310,17 @@ input[type='checkbox']:checked:is(:hover, :focus-visible) { background-image: ur
   .welcome-features p { padding: 8px 12px; }
   .welcome-features strong { margin-bottom: 2px; }
 }
+
+.run-invisibility-start-marker .run-annotation-icon, .run-invisibility-end-marker .run-annotation-icon { color: #c9b2f2; border-color: #ac86db; border-style: dashed; }
+.run-startpoint { color: #b5dbff; border-color: #8bbce8; }
+
+.player-missing { box-sizing: border-box; }
+.player-missing-portrait { position: relative; flex: 0 0 28px; width: 28px; height: 28px; }
+.player-missing-portrait > img:first-child { opacity: .35; }
+.player-missing-portrait .player-invisibility-icon { position: absolute; width: 18px; height: 18px; right: -5px; bottom: -4px; image-rendering: pixelated; }
+
+#run-routes .run-invisibility-link { stroke: #bf8cff; stroke-width: 3; stroke-dasharray: 1 7; stroke-linecap: round; }
+.run-annotation-link { pointer-events: auto; cursor: pointer; height: auto; padding: 0; border: 0; background: transparent; box-shadow: none; text-align: left; }
+.run-annotation-link:focus-visible { outline: 2px solid #bf8cff; outline-offset: 3px; }
+
+#welcome-open, #welcome-open:hover, #welcome-open:focus-visible { height: auto; padding: 0; border: 0; border-image: none; background: transparent; box-shadow: none; cursor: pointer; }
