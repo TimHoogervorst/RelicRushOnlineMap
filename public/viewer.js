@@ -1112,28 +1112,38 @@ document.addEventListener('keydown', event => {
 document.querySelector('#popup-close').addEventListener('click', () => { document.querySelector('#marker-popup').hidden = true; });
 async function refreshSession() {
   const response = await fetch('/api/auth/session', { cache: 'no-store' });
+  if (!response.ok) throw new Error('Could not check editor login. Please try again.');
   const state = await response.json();
   editorAuthenticated = state.authenticated;
   loginPanel.hidden = state.authenticated;
   setupPanel.hidden = !state.authenticated;
+  renderSidebar();
   if (state.authenticated) {
-    const project = await fetch('/api/editor/project').then(result => result.json());
-    document.querySelector('#setup-status').textContent = project.assetsConfigured
-      ? `Minecraft ${project.assets.minecraftVersion} assets are configured.`
-      : 'No matching assets are configured yet.';
-    const floors = await fetch('/api/project/floors').then(result => result.json());
-    importSections = floors.sections ?? [];
-    projectRevision = floors.revision;
-    const lifecycleFloor = document.querySelector('#lifecycle-floor-target');
-    lifecycleFloor.replaceChildren(...floors.floors.map(floor => new Option(floor.name, floor.id)));
-    await loadBlockPalette();
-    const selector = document.querySelector('#import-floor');
-    selector.replaceChildren(new Option('Create a new floor', ''));
-    for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
-    document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
-    updateImportPosition();
-    await refreshSaveStatus();
-    await refreshRecoverySnapshots();
+    // Restore/import must be reachable even before any map or render assets exist.
+    if (!floorManifest) {
+      document.querySelector('#backup-restore').closest('details').open = true;
+      document.querySelector('#import-schematic').closest('details').open = true;
+    }
+    try {
+      const response = await fetch('/api/editor/project'), project = await response.json();
+      if (!response.ok) throw new Error(project.error ?? 'Asset setup information is unavailable.');
+      document.querySelector('#setup-status').textContent = project.assetsConfigured
+        ? `Minecraft ${project.assets.minecraftVersion} assets are configured.`
+        : 'No matching assets are configured yet. Restore a project ZIP below, or configure assets and import a section.';
+    } catch (error) { document.querySelector('#setup-status').textContent = error.message; }
+    try {
+      const response = await fetch('/api/project/floors'), floors = await response.json();
+      if (!response.ok) throw new Error(floors.error ?? 'Project floor information is unavailable.');
+      importSections = floors.sections ?? [];
+      projectRevision = floors.revision;
+      document.querySelector('#lifecycle-floor-target').replaceChildren(...floors.floors.map(floor => new Option(floor.name, floor.id)));
+      const selector = document.querySelector('#import-floor');
+      selector.replaceChildren(new Option('Create a new floor', ''));
+      for (const floor of floors.floors) selector.add(new Option(floor.name, floor.id));
+      document.querySelector('#import-floor-name').disabled = Boolean(selector.value);
+      updateImportPosition();
+    } catch (error) { document.querySelector('#import-status').textContent = `${error.message} You can still restore a project ZIP above.`; }
+    await Promise.allSettled([loadBlockPalette(), refreshSaveStatus(), refreshRecoverySnapshots()]);
     if (visibleHeight < 256 && floorManifest) updateSlicePreview();
   } else { slicePreviewActive = false; selectedBlocks = []; pendingMoveDelta = 0; renderSelection(); }
 }
@@ -1202,8 +1212,12 @@ document.querySelector('#lifecycle-delete-floor').addEventListener('click', asyn
 });
 document.querySelector('#edit-mode').addEventListener('click', async () => {
   editorOpen = !editorOpen;
-  if (editorOpen) await refreshSession();
+  if (editorOpen) sidebarOpen = true;
   renderSidebar();
+  if (editorOpen) {
+    try { await refreshSession(); }
+    catch (error) { document.querySelector('#login-status').textContent = error.message; }
+  }
 });
 document.querySelector('#sidebar-close').addEventListener('click', () => { sidebarOpen = false; renderSidebar(); });
 document.querySelector('#sidebar-reopen').addEventListener('click', () => { sidebarOpen = true; renderSidebar(); });
