@@ -100,7 +100,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     failures.delete(key);
     const token = randomBytes(32).toString('base64url');
     sessions.set(token, { expires: Date.now() + sessionDurationMs });
-    res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionDurationMs / 1000)}${secureCookies || req.secure ? '; Secure' : ''}`).json({ authenticated: true });
+    res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionDurationMs / 1000)}${secureCookies || req.secure ? '; Secure' : ''}`).json({ authenticated: true, secureCookie: secureCookies || req.secure });
   });
   app.get('/api/auth/session', (req, res) => res.json({ authenticated: Boolean(getSession(req)) }));
   const iconRoots = [path.join(dataDir, 'assets', 'resource-pack'), minecraftAssetsDir];
