@@ -110,14 +110,14 @@ export function createPlayerTracker({ fetcher = fetch, now = Date.now } = {}) {
     return pending;
   }
   return {
-    async snapshot(manifest, diagnostics = false) {
+    async snapshot(manifest, diagnostics = false, observations = false) {
       await refresh();
       const expired = updatedAt === null || now() - updatedAt >= STALE_MS;
       const sections = trackingSections(manifest);
       const result = locatePlayers(expired ? [] : players, sections, diagnostics ? diagnosticAssignments : assignments, manifest.trackingSettings);
       if (diagnostics) diagnosticAssignments = result.assignments;
       else assignments = result.assignments;
-      return { updatedAt, ageMs: updatedAt === null ? null : Math.max(0, now() - updatedAt), stale: failed || expired, expired, players: result.located.filter(p => p.status === 'mapped'), ...(diagnostics ? { diagnostics: result.located, worlds: [...new Set(players.map(p => p.world))], trackingSettings: manifest.trackingSettings ?? DEFAULT_REACH, trackerOverlaps: trackerOverlaps(sections, manifest.trackingSettings), overlaps: overlappingRegions(sections) } : {}) };
+      return { updatedAt, ageMs: updatedAt === null ? null : Math.max(0, now() - updatedAt), stale: failed || expired, expired, players: result.located.filter(p => p.status === 'mapped'), ...(observations ? { observations: result.located } : {}), ...(diagnostics ? { diagnostics: result.located, worlds: [...new Set(players.map(p => p.world))], trackingSettings: manifest.trackingSettings ?? DEFAULT_REACH, trackerOverlaps: trackerOverlaps(sections, manifest.trackingSettings), overlaps: overlappingRegions(sections) } : {}) };
     },
     knows(uuid) { return players.some(p => p.uuid === uuid); }
   };

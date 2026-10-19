@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { initializeRuns } from './dungeon-runs.js';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -98,6 +99,7 @@ export function openProject(path) {
       db.prepare("INSERT INTO project_meta(key,value) VALUES('tracking_coordinates_v2','1')").run();
     })();
   }
+  initializeRuns(db);
   return db;
 }
 

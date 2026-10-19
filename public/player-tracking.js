@@ -1,4 +1,5 @@
 import { mountTrackerPoints } from './tracker-points.js';
+import { mountDungeonRuns } from './dungeon-runs.js';
 const $ = selector => document.querySelector(selector);
 const axes = ['x', 'y', 'z'];
 const fallback = '/icons/player.svg';
@@ -27,6 +28,7 @@ export function mountPlayerTracking(hooks) {
   const add = document.createElement('button'); add.type = 'button'; add.id = 'cell-add-waypoint'; add.textContent = '+ Waypoint'; $('#cell-popup').append(add);
   let players = [], sections = [], local = null, editingRevision = null, lastSuccess = 0, received = 0, following = null, navigation = 0, switching = false, stale = false, notice = '', disposed = false, wasEditing = false;
   const trackers = mountTrackerPoints({ ...hooks, follow: player => void follow(player, true) }, editor, panel, refreshEditor);
+  const runs = mountDungeonRuns({ ...hooks, stopLive: () => stop() }, panel);
   const icons = new Map(), rows = new Map(), movement = new Map();
   function stop(reason = '') { following = null; navigation++; switching = false; notice = reason; updateFollow(); }
   function updateFollow() {
@@ -38,6 +40,7 @@ export function mountPlayerTracking(hooks) {
   }
   $('#player-follow button').addEventListener('click', () => stop('Following stopped.'));
   async function follow(player, initial = false) {
+    if (runs.replaying) return;
     const token = ++navigation; following = player.uuid; notice = ''; updateFollow();
     try {
       if (hooks.state().floor?.id !== player.floorId) {
@@ -86,6 +89,7 @@ export function mountPlayerTracking(hooks) {
     updateFollow();
   }
   function draw(time) {
+    runs.draw(time);
     const { floor, zoom, editing } = hooks.state();
     trackers.draw();
     editor.hidden = !editing;
@@ -118,7 +122,7 @@ export function mountPlayerTracking(hooks) {
       icon.style.left = `${point.x * pixels}px`; icon.style.top = `${(floor.bounds.depth - point.z) * pixels}px`;
       icon.style.transform = `translate(-50%, -50%) scale(${1 / zoom})`;
       icon.classList.toggle('following', player.uuid === following);
-      if (following === player.uuid) hooks.center(point);
+      if (following === player.uuid && !runs.replaying) hooks.center(point);
     }
   }
   function animate(time) { if (disposed) return; draw(time); requestAnimationFrame(animate); }
@@ -142,7 +146,7 @@ export function mountPlayerTracking(hooks) {
         received = data.updatedAt;
       }
       players = data.players;
-      if (following) {
+      if (following && !runs.replaying) {
         const target = players.find(p => p.uuid === following);
         if (!target) stop(data.expired ? 'Positions expired · following stopped.' : 'Player left the mapped area or is no longer locatable.');
         else if (!switching && target.floorId !== hooks.state().floor?.id) void follow(target);
@@ -220,5 +224,5 @@ export function mountPlayerTracking(hooks) {
   void poll();
   window.addEventListener('pagehide', () => { disposed = true; });
   window.addEventListener('pageshow', event => { if (event.persisted && disposed) { disposed = false; requestAnimationFrame(animate); void poll(); } });
-  return { stop, get following() { return following; } };
+  return { stop: reason => { stop(reason); runs.stopFollow(); }, get following() { return runs.following || following; } };
 }

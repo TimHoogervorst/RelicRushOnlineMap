@@ -157,3 +157,46 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 .tracker-online-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; border-top: 1px solid #465448; padding-top: 8px; }
 .tracker-online-row strong, .tracker-online-row small { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .tracker-online-row small { color: #a6afa5; }
+
+/* Recording history follows the map's dark field-notes palette. */
+.run-panel { border-top: 1px solid #354038; margin-top: 14px; padding-top: 12px; }
+.run-panel label { display: block; color: #bac6b4; font-size: 11px; margin: 8px 0; }
+.run-panel input, .run-panel select { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px; color: #e5e7df; background: #202825; border: 1px solid #465044; border-radius: 4px; color-scheme: dark; }
+.run-panel small { display: block; color: #acb8a6; font-size: 10px; line-height: 1.6; }
+.run-panel button { height: auto; min-height: 30px; white-space: normal; }
+.run-status, .run-live, .run-gap { font-size: 11px; line-height: 1.5; color: #acb8a6; }
+.run-results { display: grid; gap: 8px; margin: 10px 0; }
+.run-card { border-left: 2px solid #8c9186; padding: 5px 0 5px 9px; }
+.run-card.win { border-color: #9ec784; }
+.run-card.loss { border-color: #dd756a; }
+.run-card > button:first-child { width: 100%; text-align: left; background: transparent; padding: 3px 0; border: 0; }
+.run-participants { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.run-person { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.run-person img { width: 22px; height: 22px; flex: none; image-rendering: pixelated; border-radius: 3px; border: 1px solid #697562; }
+.run-person > span { overflow-wrap: anywhere; }
+.run-ampersand { color: #c8c2ad; }
+.run-card > button:last-child:not(:first-child) { margin-top: 6px; color: #e1a298; font-size: 10px; }
+.run-replay { margin-top: 14px; padding-top: 10px; border-top: 2px solid #c85d52; }
+.run-replay h3 { font: 12px 'DM Mono', monospace; color: #ec9c8d; text-transform: uppercase; letter-spacing: .12em; }
+.run-title { font-size: 12px; overflow-wrap: anywhere; }
+.run-actions { display: flex; gap: 8px; align-items: end; }
+.run-actions > * { flex: 1; min-width: 0; }
+.run-clock { display: block; font: 12px 'DM Mono', monospace; color: #e4d8ba; }
+.run-exit { margin-top: 12px; width: 100%; }
+#run-routes, #run-heads { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+#run-routes { z-index: 1; }
+#run-routes polyline { fill: none; stroke: #f2685c; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+#run-routes .run-route-glow { stroke: #ffd9b1; stroke-width: 10; opacity: .55; filter: drop-shadow(0 0 4px #ff6d58); }
+#run-routes .run-route-outline { stroke: #241c19; stroke-width: 6; }
+#run-routes .run-route-line { stroke: #ff7968; stroke-width: 3; }
+#run-annotations { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+.run-annotation { position: absolute; display: flex; align-items: center; gap: 5px; transform-origin: 0 0; color: #f9e9d3; white-space: nowrap; font: 11px 'DM Mono', monospace; }
+.run-annotation-icon { width: 28px; height: 28px; line-height: 24px; box-sizing: border-box; text-align: center; flex: none; background: #201d1bee; border: 2px solid #e9c58c; border-radius: 50%; font-size: 21px; font-weight: bold; box-shadow: 0 0 8px #171d1b; }
+.run-annotation > span:last-child { background: #171d1bed; padding: 4px 7px; border: 1px solid #6d7361; border-radius: 4px; }
+.run-loss-marker .run-annotation-icon { color: #ff9b89; border-color: #ff7968; }
+#run-heads { z-index: 3; }
+.run-head { position: absolute; width: 26px; height: 26px; image-rendering: pixelated; border: 2px solid #f2685c; background: #171d1b; border-radius: 5px; }
+.run-head:nth-child(2) { border-style: dashed; }
+.run-endpoint { position: absolute; z-index: 3; color: #b7e193; background: #17251fe8; border: 1px solid #9ec784; border-radius: 50%; width: 28px; height: 28px; text-align: center; line-height: 28px; pointer-events: none; }
+.replaying #player-layer { display: none; }
+@media (max-width: 600px) { .players-panel:has(.run-replay:not([hidden])) { max-height: 50vh; width: 230px; } }

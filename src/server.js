@@ -1,4 +1,6 @@
 import { editTrackerPoints, trackerState, writeTrackerState } from './tracker-points.js';
+import { activeRun, summarizeRun, readEndpoint, saveEndpoint, listRuns, runDetail, deleteRun } from './dungeon-runs.js';
+import { createRunRecorder } from './run-recorder.js';
 import { listItemIcons, renderItemIcon } from './item-icons.js';
 import { createPlayerTracker, saveCalibration, trackingSections, overlappingRegions } from './player-tracking.js';
 import { createHeadCache, GENERIC_HEAD } from './player-heads.js';
@@ -29,7 +31,7 @@ function originAllowed(req) {
   catch { return false; }
 }
 
-export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, assetExtractor, renderer, playerFetcher = fetch } = {}) {
+export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.join(root, 'data')), password = process.env.EDITOR_PASSWORD ?? 'relic-local', loginLimit = 5, secureCookies = process.env.COOKIE_SECURE === 'true', sessionDurationMs = SESSION_MS, initializeWorker = true, recordRuns = initializeWorker, assetExtractor, renderer, playerFetcher = fetch } = {}) {
   const app = express();
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
@@ -70,6 +72,8 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   const generation = createGenerationService({ dataDir, renderer: renderer ?? { render: renderInWorker }, assetsDir: minecraftAssetsDir });
   const playerTracker = createPlayerTracker({ fetcher: playerFetcher });
   const playerHead = createHeadCache(path.join(dataDir, 'player-heads'), playerFetcher);
+  const runRecorder = createRunRecorder({ database: path.join(dataDir, 'project.sqlite'), tracker: playerTracker, manifest: () => generation.currentManifest(), paused: () => restoreBusy || backupBusy });
+  app.locals.runRecorder = runRecorder;
   let activeWorker;
   let assetSetupBusy = false;
   const startWorker = (forceRender = false) => {
@@ -135,6 +139,35 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   for (const namespace of ['/api/editor', '/api/assets', '/api/project', '/api/backups', '/api/generation', '/api/setup']) app.use(namespace, protectNamespace);
 
   app.get('/health', (_req, res) => res.status(workerState.ready ? 200 : 503).json({ status: workerState.ready ? 'ok' : 'starting', worker: workerState }));
+  const withRuns = handler => (req, res) => {
+    if (restoreBusy) return res.status(503).json({ error: 'Project restore in progress.' });
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try { handler(req, res, db); }
+    catch (error) { res.status(400).json({ error: error.message }); }
+    finally { db.close(); }
+  };
+  app.get('/api/runs', withRuns((req, res, db) => {
+    const query = { name: req.query.name ?? '', limit: Number(req.query.limit ?? 5), beforeId: req.query.beforeId ?? '' };
+    for (const key of ['from', 'to', 'before']) if (req.query[key] !== undefined) query[key] = Number(req.query[key]);
+    res.set('Cache-Control', 'no-store').json(listRuns(db, query));
+  }));
+  app.get('/api/runs/live', withRuns((_req, res, db) => {
+    const run = activeRun(db);
+    const encounters = db.prepare('SELECT run_id,value FROM run_encounters WHERE time>=? ORDER BY time').all(Date.now() - 8000).map(row => ({ runId: row.run_id, ...JSON.parse(row.value) }));
+    res.set('Cache-Control', 'no-store').json({ active: run ? summarizeRun(run) : null, endpoint: readEndpoint(db), encounters });
+  }));
+  app.get('/api/runs/:id', withRuns((req, res, db) => {
+    const run = runDetail(db, req.params.id);
+    if (!run || run.status === 'active') return res.status(404).json({ error: 'Completed recording not found.' });
+    res.set('Cache-Control', 'no-store').json(run);
+  }));
+  app.delete('/api/project/runs/:id', withRuns((req, res, db) => { deleteRun(db, req.params.id); res.status(204).end(); }));
+  app.put('/api/project/run-endpoint', async (req, res) => {
+    try {
+      const manifest = await generation.currentManifest();
+      withRuns((_req, response, db) => response.json({ endpoint: saveEndpoint(db, req.body.endpoint, manifest) }))(req, res);
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
   app.get('/api/players', async (_req, res) => {
     if (restoreBusy) return res.status(503).json({ error: 'Project restore in progress.' });
     try {
@@ -144,7 +177,12 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
   app.get('/api/players/:uuid/head', async (req, res) => {
     const uuid = req.params.uuid;
-    if (!/^[a-f0-9]{32}$/.test(uuid) || !playerTracker.knows(uuid)) return res.status(404).end();
+    if (restoreBusy || !/^[a-f0-9]{32}$/.test(uuid)) return res.status(404).end();
+    if (!playerTracker.knows(uuid)) {
+      const db = openProject(path.join(dataDir, 'project.sqlite'));
+      try { if (!db.prepare('SELECT 1 FROM run_participants WHERE uuid=? LIMIT 1').get(uuid)) return res.status(404).end(); }
+      finally { db.close(); }
+    }
     const head = await playerHead(uuid);
     res.set('Cache-Control', head ? 'public, max-age=3600' : 'public, max-age=60').type(head ? 'png' : 'svg').send(head ?? GENERIC_HEAD);
   });
@@ -252,6 +290,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       if (['saving', 'unsaved'].includes(generation.queue.status.state)) return res.status(409).json({ error: 'Wait for the active map save to finish before restoring a project backup.' });
       const drainStarted = Date.now(); while (protectedRequests > 1) { if (Date.now() - drainStarted > 30000) return res.status(503).json({ error: 'Could not pause active editor requests for restore. Try again shortly.' }); await new Promise(resolve => setTimeout(resolve, 25)); }
       const result = await restoreProjectBackup({ dataDir, bytes: req.body, confirm: req.get('x-confirm-restore') });
+      runRecorder.reset();
       startWorker(false);
       res.json({ ...result, message: 'Project restored. Reload the map to see the restored revision.' });
     } catch (error) { res.status(400).json({ error: error.message || 'Project restore failed. The existing project was preserved.' }); }
@@ -839,6 +878,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   });
 
   if (initializeWorker) mkdir(dataDir, { recursive: true }).then(() => startWorker()).catch(error => { workerState = { ready: false, error: error.message }; });
+  if (recordRuns) mkdir(dataDir, { recursive: true }).then(() => runRecorder.start()).catch(error => console.error('Could not start run recording:', error));
   return app;
 }
 
