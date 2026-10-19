@@ -138,3 +138,22 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 .marker-size-setting label, .marker-size-setting output { display: block; }
 .marker-size-setting input { width: 100%; margin: 10px 0; accent-color: #b8d597; }
 .marker-size-setting output { color: #a6afa5; font-size: 11px; }
+
+/* Tracker corrections are an editor-only overlay. */
+#tracker-layer { position: absolute; inset: 0; pointer-events: none; }
+.tracker-point { position: absolute; pointer-events: auto; width: 26px; min-width: 26px; height: 26px; padding: 0; color: #8ce0db; border: 1px solid #8ce0db; background: #162b2b; }
+.tracker-reach { position: absolute; transform: translate(-50%, -50%); border: 1px dashed #8ce0db; border-radius: 50%; background: #8ce0db18; }
+.tracker-controls { border-top: 1px solid #465448; margin-top: 16px; padding-top: 8px; }
+.tracker-controls output { float: right; color: #8ce0db; }
+.tracker-controls input[type="range"] { width: 100%; accent-color: #8ce0db; }
+.tracker-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tracker-actions select { min-width: 0; max-width: 100%; }
+.tracker-item { padding: 10px 0; border-bottom: 1px solid #465448; }
+.tracker-item small { display: block; margin-top: 6px; }
+.tracker-item [aria-pressed="true"] { border-color: #8ce0db; }
+.tracker-overlaps { white-space: pre-line; color: #f3cf72; }
+.tracker-capture { padding: 10px; border: 1px solid #8ce0db; margin-top: 12px; }
+.tracker-capture p { overflow-wrap: anywhere; }
+.tracker-online-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; border-top: 1px solid #465448; padding-top: 8px; }
+.tracker-online-row strong, .tracker-online-row small { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.tracker-online-row small { color: #a6afa5; }

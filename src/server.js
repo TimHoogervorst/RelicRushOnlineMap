@@ -1,3 +1,4 @@
+import { editTrackerPoints, trackerState, writeTrackerState } from './tracker-points.js';
 import { listItemIcons, renderItemIcon } from './item-icons.js';
 import { createPlayerTracker, saveCalibration, trackingSections, overlappingRegions } from './player-tracking.js';
 import { createHeadCache, GENERIC_HEAD } from './player-heads.js';
@@ -33,6 +34,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
   app.disable('x-powered-by');
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
   const sessions = new Map(), failures = new Map();
+  const trackerHistory = new Map();
   const markerHistory = new Map();
   const markerTypeHistory = new Map();
   const blockHistory = new Map();
@@ -110,7 +112,7 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
     } catch { return res.status(404).end(); }
   });
   app.post('/api/auth/logout', requireEditor, requireSameOrigin, (req, res) => {
-    const active = getSession(req); if (active) { sessions.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); sectionTransformHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
+    const active = getSession(req); if (active) { sessions.delete(active.token); trackerHistory.delete(active.token); markerHistory.delete(active.token); markerTypeHistory.delete(active.token); blockHistory.delete(active.token); sectionHistory.delete(active.token); sectionTransformHistory.delete(active.token); connectionHistory.delete(active.token); renderSettingsHistory.delete(active.token); lifecycleHistory.delete(active.token); }
     res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookies ? '; Secure' : ''}`).status(204).end();
   });
 
@@ -160,6 +162,30 @@ export function createApp({ dataDir = path.resolve(process.env.DATA_DIR ?? path.
       const result = saveCalibration(db, req.params.id, method === 'delete' ? null : req.body?.calibration, req.body?.expectedRevision);
       try { await generation.saveMetadata(snapshotProject(db)); res.json({ ...result, saved: true }); }
       catch (error) { res.status(202).json({ ...result, saved: false, warning: error.message }); }
+    } catch (error) { res.status(/another editor tab/.test(error.message) ? 409 : 400).json({ error: error.message }); }
+    finally { db.close(); }
+  });
+  app.post('/api/project/tracker-points', requireEditor, requireSameOrigin, async (req, res) => {
+    const db = openProject(path.join(dataDir, 'project.sqlite'));
+    try {
+      const token = getSession(req).token, history = trackerHistory.get(token) ?? { undo: [], redo: [] };
+      const direction = req.body?.direction;
+      let result;
+      if (direction) {
+        if (!['undo', 'redo'].includes(direction)) throw new Error('Invalid history direction.');
+        const source = history[direction], target = history[direction === 'undo' ? 'redo' : 'undo'];
+        const command = source.at(-1);
+        if (!command) throw new Error(`No tracker edit to ${direction}.`);
+        if (JSON.stringify(trackerState(db, command.sectionId)) !== JSON.stringify(direction === 'undo' ? command.after : command.before)) throw new Error('Tracker points changed since this edit. Undo the intervening edit first.');
+        result = writeTrackerState(db, command.sectionId, direction === 'undo' ? command.before : command.after, req.body.expectedRevision);
+        source.pop(); target.push(command);
+      } else {
+        result = editTrackerPoints(db, req.body, req.body?.expectedRevision);
+        history.undo.push(result); if (history.undo.length > 50) history.undo.shift(); history.redo = [];
+      }
+      trackerHistory.set(token, history);
+      try { await generation.saveMetadata(snapshotProject(db)); res.json({ revision: result.revision, saved: true }); }
+      catch (error) { res.status(202).json({ revision: result.revision, saved: false, warning: error.message }); }
     } catch (error) { res.status(/another editor tab/.test(error.message) ? 409 : 400).json({ error: error.message }); }
     finally { db.close(); }
   });

@@ -33,3 +33,9 @@ export function upgradeCalibration(calibration, blocks) {
   }
   return next;
 }
+
+export function localToWorld(point, calibration, orientation = DEFAULT_TRACKING_ORIENTATION) {
+  const [a, b, c, d] = orientation;
+  const x = point.x - calibration.local.x - 0.5, z = point.z - calibration.local.z - 0.5;
+  return { x: calibration.actual.x + 0.5 + a * x + c * z, y: calibration.actual.y + point.y - calibration.local.y, z: calibration.actual.z + 0.5 + b * x + d * z };
+}

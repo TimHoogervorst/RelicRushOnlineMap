@@ -114,7 +114,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
         let resourcePack = null;
         try { resourcePack = JSON.parse(await readFile(path.join(path.dirname(assetsDir), 'resource-pack', 'resource-pack-source.json'), 'utf8')); } catch {}
         const assets = await assetFingerprint();
-        const manifest = { manifestVersion: 1, generatorVersion: GENERATOR_VERSION, projectRevision: snapshot.revision, projectHash: projectHash(snapshot), assetVersion: assets.assetVersion, assetHash: assets.assetHash, renderSettingsHash: sha256(renderSettings(snapshot)), generatedAt: new Date().toISOString(), resourcePack, floors };
+        const manifest = { manifestVersion: 1, generatorVersion: GENERATOR_VERSION, projectRevision: snapshot.revision, trackingSettings: snapshot.trackingSettings, projectHash: projectHash(snapshot), assetVersion: assets.assetVersion, assetHash: assets.assetHash, renderSettingsHash: sha256(renderSettings(snapshot)), generatedAt: new Date().toISOString(), resourcePack, floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
@@ -139,7 +139,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
       if (pointer.revision >= snapshot.revision) throw new Error('Stale revision; reload and retry your edit.');
       const previousDir = path.join(releasesDir, pointer.directory);
       const previousProject = JSON.parse(await readFile(path.join(previousDir, 'project.json'), 'utf8'));
-      const geometry = value => (value.floors ?? []).map(({ id, dimensions, blocks, sections }) => ({ id, dimensions, blocks, sections: sections?.map(({ calibration: _calibration, trackingOrientation: _orientation, ...geometry }) => geometry) }));
+      const geometry = value => (value.floors ?? []).map(({ id, dimensions, blocks, sections }) => ({ id, dimensions, blocks, sections: sections?.map(({ calibration: _calibration, trackingOrientation: _orientation, trackerPoints: _points, ...geometry }) => geometry) }));
       if (JSON.stringify(geometry(previousProject)) !== JSON.stringify(geometry(snapshot))) throw new Error('Geometry has not been saved yet. Save the complete project before marker changes.');
       const previousManifest = JSON.parse(await readFile(path.join(previousDir, 'manifest.json'), 'utf8'));
       const tempName = `.building-${snapshot.revision}-${randomUUID()}`;
@@ -158,7 +158,7 @@ export function createGenerationService({ dataDir, renderer, assetsDir }) {
         if (!isLatest()) throw new Error('Save superseded by a newer project revision.');
         progress('Writing metadata revision', 90);
         floors.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
-        const manifest = { ...previousManifest, projectRevision: snapshot.revision, projectHash: projectHash(snapshot), generatedAt: new Date().toISOString(), floors };
+        const manifest = { ...previousManifest, projectRevision: snapshot.revision, trackingSettings: snapshot.trackingSettings, projectHash: projectHash(snapshot), generatedAt: new Date().toISOString(), floors };
         await writeFile(path.join(temporary, 'manifest.json'), JSON.stringify(manifest, null, 2));
         await writeFile(path.join(temporary, 'project.json'), JSON.stringify(snapshot));
         await rm(final, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 # Tracker points: handoff for a grilling session
 
 Date: 2026-10-19
-Status: design grilled; final shared-understanding confirmation pending. Implementation has not started in this session.
+Status: design confirmed and implementation authorized on 2026-10-19. Implemented; owner testing of known in-game problem cases remains pending.
 
 ## Problem
 
@@ -26,7 +26,7 @@ The user explicitly confirmed that tracker points identify the correct section; 
 - Keep normal tracking as the default. An applicable nearby tracker point takes precedence to correct locations where normal tracking fails.
 - Tracker points are based on the section's existing calibration waypoint and update along with calibration changes; fixed world coordinates independent of recalibration were not accepted.
 - The owner will test known problem cases after implementation and provide feedback for refinement. Recorded route replay is not an agreed prerequisite.
-- Influence controls belong in editing settings, not on individual tracker points or players. One shared set applies to all players and points and is saved with the project. The accepted recommendation is horizontal reach (X/Z), initially 3 blocks, and vertical reach (Y), initially 1 block. The owner's final phrase "one slider" is interpreted as one shared set retaining the previously accepted two axes; this interpretation is included in final confirmation.
+- Influence controls belong in editing settings, not on individual tracker points or players. One shared set applies to all players and points and is saved with the project. Confirmed controls are horizontal reach (X/Z), initially 3 blocks, and vertical reach (Y), initially 1 block.
 - Tracker points preserve their position relative to the calibrated section: correcting the waypoint's world Y by +5 also shifts the point's effective world Y by +5. Moving a section in the displayed layout does not change its world position.
 - A tracker point may override the section's normal tracking box, including normal floor selection, provided the destination has valid calibration in the same Minecraft world.
 - Among applicable points for different sections, the nearest point by three-dimensional world distance wins. Exact ties retain the previous section if it is a tied destination; otherwise the assignment is ambiguous. Points for the same section agree.
@@ -37,7 +37,17 @@ The user explicitly confirmed that tracker points identify the correct section; 
 
 ## Final confirmation
 
-Confirm the shared two-control interpretation and complete design before implementation. Proposed precise influence rule: horizontal circular distance at most the shared X/Z reach AND absolute Y difference at most the shared Y reach (a vertical cylinder). Inside that region the point has full precedence, with no gradual strength weighting. Existing stale-feed display behavior remains applicable; each new position is matched directly, including teleports. Slider ranges and increments are routine UI implementation choices, not separate strength weights.
+The owner confirmed the complete design and explicitly authorized implementation. Influence uses horizontal circular distance at most the shared X/Z reach AND absolute Y difference at most the shared Y reach (a vertical cylinder). Inside that region the point has full precedence, with no gradual strength weighting. Existing stale-feed display behavior remains applicable; each new position is matched directly, including teleports. Sliders support 0.25–64 blocks in quarter-block increments.
+
+## Using the implementation
+
+1. Enter Edit. The Players panel lists all players reported by the feed, including outside and ambiguous positions.
+2. Click Add tracker beside a player. Select the correct calibrated section, optionally name the point, and save. Coordinates are frozen when the button is clicked.
+3. In Player tracking, adjust the shared horizontal and vertical reach. Select a section to manage its points; select a point to see its horizontal reach on the map. Vertical reach is shown in the controls and point tooltip.
+4. Rename, delete, or replace a point using an online player's position. Undo tracker edit and Redo cover these changes and reach settings.
+5. Test a known bad route and nearby floors. Visitors receive corrected assignments without seeing the editor overlay.
+
+Points use fractional section-local coordinates derived from the calibration waypoint. They persist with section data, while shared reach persists with project settings. Metadata-only saves publish these edits without terrain rendering; saves that cannot publish show a retry message. Tests cover vertical/horizontal boundaries, competing points, calibration changes, rotations/flips, lifecycle restore, authenticated API edits, history, publication, and backup restore.
 
 ## Existing implementation and context
 
@@ -48,6 +58,6 @@ Confirm the shared two-control interpretation and complete design before impleme
 - Main files: [server matcher](../src/player-tracking.js), [coordinate transforms](../src/tracking-coordinates.js), [tracking UI](../public/player-tracking.js), [project storage](../src/project-store.js), and [tracking tests](../tests/player-tracking.test.js).
 - Background: [accuracy research](research/player-tracking-accuracy.md), [existing design decisions](design-decisions.md), and [domain glossary](../GLOSSARY.md).
 
-## Fresh-session prompt
+## Original grilling prompt (completed)
 
 > Use grill-with-docs to grill the tracker-point concept in docs/tracker-points-handoff.md. Read the existing tracking implementation and research notes for context. The agreed purpose is local correction of section/floor membership while keeping the existing calibration waypoint for exact positioning. Resolve the open questions, record accepted decisions, and do not begin implementation during the grilling session.

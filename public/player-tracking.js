@@ -1,3 +1,4 @@
+import { mountTrackerPoints } from './tracker-points.js';
 const $ = selector => document.querySelector(selector);
 const axes = ['x', 'y', 'z'];
 const fallback = '/icons/player.svg';
@@ -25,6 +26,7 @@ export function mountPlayerTracking(hooks) {
   }
   const add = document.createElement('button'); add.type = 'button'; add.id = 'cell-add-waypoint'; add.textContent = '+ Waypoint'; $('#cell-popup').append(add);
   let players = [], sections = [], local = null, editingRevision = null, lastSuccess = 0, received = 0, following = null, navigation = 0, switching = false, stale = false, notice = '', disposed = false, wasEditing = false;
+  const trackers = mountTrackerPoints({ ...hooks, follow: player => void follow(player, true) }, editor, panel, refreshEditor);
   const icons = new Map(), rows = new Map(), movement = new Map();
   function stop(reason = '') { following = null; navigation++; switching = false; notice = reason; updateFollow(); }
   function updateFollow() {
@@ -85,6 +87,7 @@ export function mountPlayerTracking(hooks) {
   }
   function draw(time) {
     const { floor, zoom, editing } = hooks.state();
+    trackers.draw();
     editor.hidden = !editing;
     waypoints.hidden = !editing;
     if (floor && (waypointRevision !== floor.projectRevision || waypointFloor !== floor.id)) {
@@ -146,7 +149,7 @@ export function mountPlayerTracking(hooks) {
       }
       renderList();
     } catch { stale = true; notice = 'Tracking unavailable · reconnecting…'; renderList(); }
-    if (hooks.state().editing && editor.open) await refreshEditor().catch(error => { $('#tracking-diagnostics').textContent = error.message; });
+    if (hooks.state().editing) await refreshEditor().catch(error => { trackers.unavailable(); $('#tracking-diagnostics').textContent = error.message; });
     if (!disposed) setTimeout(poll, 2000);
   }
 
@@ -177,6 +180,7 @@ export function mountPlayerTracking(hooks) {
     const current = sections.find(s => s.id === select.value);
     $('#tracking-calibration-state').textContent = current?.calibration?.invalidReason ?? (current?.calibration ? 'Calibrated' : 'Needs waypoint');
     $('#tracking-overlaps').textContent = data.overlaps.map(pair => `Overlap: ${pair.map(id => sections.find(s => s.id === id)?.name).join(' / ')}`).join('\n');
+    trackers.update(data);
     const format = p => axes.map(axis => `${axis.toUpperCase()} ${Number(p[axis]).toFixed(2)}`).join(', ');
     $('#tracking-diagnostics').textContent = (data.stale ? 'STALE FEED\n' : '') + (data.diagnostics.map(p => `${p.name} · ${p.world}\nWorld: ${format(p)}\n${p.local ? `Local: ${format(p.local)}\n${p.floorName} / ${p.sectionName}${p.trackingY ? `\nTracking Y: ${p.trackingY.min} ≤ Y < ${p.trackingY.max}` : ''}` : `${p.status}${p.candidates?.length ? ': ' + p.candidates.join(', ') : ''}`}`).join('\n\n') || 'No current player positions.');
   }

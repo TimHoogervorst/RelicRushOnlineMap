@@ -1,3 +1,4 @@
+import { activeTrackerPoints, trackerCandidates, trackerOverlaps, DEFAULT_REACH } from './tracker-points.js';
 import { readSectionBlocks, advanceProjectRevision, projectRevision } from './project-store.js';
 import { DEFAULT_TRACKING_ORIENTATION, defaultTrackingRegion, worldToLocal } from './tracking-coordinates.js';
 
@@ -47,8 +48,8 @@ export function overlappingRegions(sections) {
   return overlaps;
 }
 
-export function locatePlayers(players, sections, previous = new Map()) {
-  const assignments = new Map();
+export function locatePlayers(players, sections, previous = new Map(), reach = DEFAULT_REACH) {
+  const assignments = new Map(), points = activeTrackerPoints(sections);
   const located = players.map(player => {
     const candidates = sections.filter(section => {
       const c = section.calibration;
@@ -62,12 +63,14 @@ export function locatePlayers(players, sections, previous = new Map()) {
     }
     const highestBase = Math.max(-Infinity, ...floors.values());
     const floorCandidates = candidates.filter(candidate => floors.get(candidate.floorId) === highestBase);
-    const section = floorCandidates.length === 1 ? floorCandidates[0] : floorCandidates.find(s => s.id === previous.get(player.uuid));
-    if (!section) return { ...player, status: candidates.length ? 'ambiguous' : 'outside', candidates: floorCandidates.map(s => s.name) };
+    const corrections = trackerCandidates(player, points, reach);
+    const choices = corrections.length ? corrections : floorCandidates;
+    const section = choices.length === 1 ? choices[0] : choices.find(s => s.id === previous.get(player.uuid));
+    if (!section) return { ...player, status: choices.length ? 'ambiguous' : 'outside', candidates: choices.map(s => s.name) };
     assignments.set(player.uuid, section.id);
     const c = section.calibration;
     const local = worldToLocal(player, c, section.trackingOrientation);
-    return { ...player, status: 'mapped', sectionId: section.id, sectionName: section.name, floorId: section.floorId, floorName: section.floorName, trackingY: { min: c.region.min.y, max: c.region.max.y }, local, display: { x: local.x + section.placementX, z: local.z + section.placementZ } };
+    return { ...player, status: 'mapped', assignmentSource: corrections.length ? 'tracker' : 'region', sectionId: section.id, sectionName: section.name, floorId: section.floorId, floorName: section.floorName, trackingY: { min: c.region.min.y, max: c.region.max.y }, local, display: { x: local.x + section.placementX, z: local.z + section.placementZ } };
   });
   return { located, assignments };
 }
@@ -111,10 +114,10 @@ export function createPlayerTracker({ fetcher = fetch, now = Date.now } = {}) {
       await refresh();
       const expired = updatedAt === null || now() - updatedAt >= STALE_MS;
       const sections = trackingSections(manifest);
-      const result = locatePlayers(expired ? [] : players, sections, diagnostics ? diagnosticAssignments : assignments);
+      const result = locatePlayers(expired ? [] : players, sections, diagnostics ? diagnosticAssignments : assignments, manifest.trackingSettings);
       if (diagnostics) diagnosticAssignments = result.assignments;
       else assignments = result.assignments;
-      return { updatedAt, ageMs: updatedAt === null ? null : Math.max(0, now() - updatedAt), stale: failed || expired, expired, players: result.located.filter(p => p.status === 'mapped'), ...(diagnostics ? { diagnostics: result.located, worlds: [...new Set(players.map(p => p.world))], overlaps: overlappingRegions(sections) } : {}) };
+      return { updatedAt, ageMs: updatedAt === null ? null : Math.max(0, now() - updatedAt), stale: failed || expired, expired, players: result.located.filter(p => p.status === 'mapped'), ...(diagnostics ? { diagnostics: result.located, worlds: [...new Set(players.map(p => p.world))], trackingSettings: manifest.trackingSettings ?? DEFAULT_REACH, trackerOverlaps: trackerOverlaps(sections, manifest.trackingSettings), overlaps: overlappingRegions(sections) } : {}) };
     },
     knows(uuid) { return players.some(p => p.uuid === uuid); }
   };

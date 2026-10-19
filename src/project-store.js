@@ -65,6 +65,7 @@ export function openProject(path) {
     DROP TRIGGER IF EXISTS section_connection_floor_reassignment;
   `);
   const sectionColumns = new Set(db.pragma('table_info(sections)').map(column => column.name));
+  if (!sectionColumns.has('tracker_points_json')) db.exec("ALTER TABLE sections ADD COLUMN tracker_points_json TEXT NOT NULL DEFAULT '[]'");
   if (!sectionColumns.has('calibration_json')) db.exec('ALTER TABLE sections ADD COLUMN calibration_json TEXT');
   if (!sectionColumns.has('tracking_orientation_json')) db.exec('ALTER TABLE sections ADD COLUMN tracking_orientation_json TEXT');
   if (!sectionColumns.has('label_x')) db.exec('ALTER TABLE sections ADD COLUMN label_x REAL NOT NULL DEFAULT 0');
@@ -652,10 +653,11 @@ export function snapshotProject(db) {
     stairs: db.prepare(`SELECT m.id,m.stair_destination_id AS destinationId FROM markers m LEFT JOIN markers p ON p.id=m.stair_destination_id LEFT JOIN sections s ON s.id=p.section_id WHERE m.stair_destination_id IS NOT NULL AND (p.id IS NULL OR p.type<>'stairs' OR s.id IS NULL)`).all(),
     connections: db.prepare(`SELECT c.id,c.section_a_id AS sectionAId,c.section_b_id AS sectionBId FROM section_connections c LEFT JOIN sections a ON a.id=c.section_a_id LEFT JOIN sections b ON b.id=c.section_b_id WHERE a.id IS NULL OR b.id IS NULL`).all()
   };
-  return { revision, unresolvedRecords, floors: floors.map(floor => {
-    const sections = db.prepare(`SELECT s.id,s.name,s.bounds_json,s.placement_x,s.placement_z,s.label_x,s.label_z,s.sort_order,s.calibration_json,s.tracking_orientation_json,r.settings_json
+  return { revision, trackingSettings: JSON.parse(db.prepare("SELECT value FROM project_meta WHERE key='tracking_settings'").get()?.value ?? '{"horizontal":3,"vertical":1}'), unresolvedRecords, floors: floors.map(floor => {
+    const sections = db.prepare(`SELECT s.id,s.name,s.bounds_json,s.placement_x,s.placement_z,s.label_x,s.label_z,s.sort_order,s.calibration_json,s.tracking_orientation_json,s.tracker_points_json,r.settings_json
       FROM sections s LEFT JOIN section_render_settings r ON r.section_id=s.id WHERE s.floor_id=? ORDER BY s.sort_order,s.id`).all(floor.id).map(row => ({
       id: row.id, name: row.name, sortOrder: row.sort_order, bounds: JSON.parse(row.bounds_json), placementX: row.placement_x, placementZ: row.placement_z, labelX: row.label_x, labelZ: row.label_z,
+      trackerPoints: JSON.parse(row.tracker_points_json),
       calibration: row.calibration_json ? JSON.parse(row.calibration_json) : null,
       trackingOrientation: row.tracking_orientation_json ? JSON.parse(row.tracking_orientation_json) : [...DEFAULT_TRACKING_ORIENTATION],
       renderSettings: { ...(row.settings_json ? JSON.parse(row.settings_json) : defaultSectionRenderSettings()), ...renderOptions }
@@ -1033,7 +1035,7 @@ export function restoreSectionLayout(db, command, direction, expectedRevision) {
 }
 
 function sectionTransformState(db, sectionId) {
-  const section = db.prepare('SELECT id,bounds_json,label_x,label_z FROM sections WHERE id=?').get(sectionId);
+  const section = db.prepare('SELECT id,bounds_json,label_x,label_z,tracker_points_json FROM sections WHERE id=?').get(sectionId);
   if (!section) throw new Error('Section does not exist.');
   return {
     section,
@@ -1107,6 +1109,8 @@ function applySectionTransform(db, sectionId, operation, inverse = false) {
   const exits = state.exits.map(exit => ({ ...exit, ...point(exit.x,exit.z) }));
   const markers = state.markers.map(marker => ({ ...marker, ...point(marker.x,marker.z) }));
   const label = point(state.section.label_x,state.section.label_z);
+  const trackerPoints = JSON.parse(state.section.tracker_points_json).map(p => ({ ...p, local: { ...p.local, ...point(p.local.x, p.local.z) } }));
+  db.prepare('UPDATE sections SET tracker_points_json=? WHERE id=?').run(JSON.stringify(trackerPoints), sectionId);
   const tracking = db.prepare('SELECT calibration_json,tracking_orientation_json FROM sections WHERE id=?').get(sectionId);
   const orientation = tracking.tracking_orientation_json ? JSON.parse(tracking.tracking_orientation_json) : DEFAULT_TRACKING_ORIENTATION;
   const origin = point(0, 0), xAxis = point(1, 0), zAxis = point(0, 1);
