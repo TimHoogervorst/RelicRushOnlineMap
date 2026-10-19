@@ -85,7 +85,9 @@ export function mountPlayerTracking(hooks) {
       }
       const label = row.lastChild;
       label.replaceChildren(); const name = document.createElement('strong'), place = document.createElement('small');
-      name.textContent = player.name; place.textContent = `${player.floorName} · ${player.sectionName}`; label.append(name, place);
+      const slot = liveRun?.participants.findIndex(p => p.uuid === player.uuid) ?? -1;
+      const role = slot >= 0 ? `Player ${slot + 1} (${slot === 0 ? 'red' : 'blue'})` : liveRun?.participants.length === 2 ? 'Spectator' : '';
+      name.textContent = player.name; place.textContent = `${role ? `${role} · ` : ''}${player.floorName} · ${player.sectionName}`; label.append(name, place);
       icons.get(player.uuid).title = player.name; icons.get(player.uuid).setAttribute('aria-label', `Follow ${player.name}`);
       const headVersion = String(Math.floor(Date.now() / 60000));
       for (const img of [row.querySelector('img'), icons.get(player.uuid).querySelector('img')]) {

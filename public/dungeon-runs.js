@@ -201,7 +201,8 @@ export function mountDungeonRuns(hooks, panel) {
       for (const [uuid, samples] of tracks) {
         for (const segment of routeSegments(samples, new Set(sections.keys()))) {
           const line = document.createElementNS(svgNS, 'polyline'); line.setAttribute('points', segment.map(s => { const p = display(s); return `${p.x * pixels},${(floor.bounds.depth - p.z) * pixels}`; }).join(' '));
-          line.setAttribute('vector-effect', 'non-scaling-stroke'); if (index) line.setAttribute('stroke-dasharray', '7 5');
+          line.setAttribute('vector-effect', 'non-scaling-stroke');
+          if (index === 1) { line.classList.add('run-player-two'); line.setAttribute('stroke-dasharray', '7 5'); }
           const glow = line.cloneNode(); glow.classList.add('run-route-glow');
           const outline = line.cloneNode(); outline.classList.add('run-route-outline');
           line.classList.add('run-route-line'); overlay.append(glow, outline, line);

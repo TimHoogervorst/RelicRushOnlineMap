@@ -60,11 +60,26 @@ export function interruptRuns(db, now = Date.now()) {
 
 // Each call is a transaction over a fresh observation, or an uncertainty tick.
 // State is durable so crashes cannot silently discard an in-progress recording.
-export function recordObservation(db, snapshot, manifest, now = Date.now()) {
+// Spectator membership is deliberately transient: never include it in saved runs.
+const spectatorSessions = new WeakMap();
+export function recordObservation(db, snapshot, manifest, now = Date.now(), spectators) {
+  if (!spectators) {
+    if (!spectatorSessions.has(db)) spectatorSessions.set(db, new Set());
+    spectators = spectatorSessions.get(db);
+  }
   return db.transaction(() => {
     let run = activeRun(db);
     const fresh = !snapshot.stale && snapshot.updatedAt !== null;
-    const players = snapshot.observations ?? snapshot.diagnostics ?? snapshot.players ?? [];
+    const observations = snapshot.observations ?? snapshot.diagnostics ?? snapshot.players ?? [];
+    if (fresh) {
+      // Missing feed entries can mean invisibility, so only an observed exit
+      // releases a spectator for a subsequent visit.
+      for (const player of observations) {
+        if (player.status === 'outside') spectators.delete(player.uuid);
+        else if (player.status === 'mapped' && run?.participants.length >= 2 && !run.participants.some(p => p.uuid === player.uuid)) spectators.add(player.uuid);
+      }
+    }
+    const players = observations.filter(p => !spectators.has(p.uuid));
     if (run && fresh) {
       const restarted = run.participants.some(p => !p.finished && p.absentSince !== null && players.some(player => player.uuid === p.uuid && player.status === 'mapped' &&
         (snapshot.updatedAt - p.absentSince >= 300000 || (player.sectionId === run.startpoint?.sectionId && qualifies(player, run.startpoint)))));
@@ -86,7 +101,8 @@ export function recordObservation(db, snapshot, manifest, now = Date.now()) {
       const time = snapshot.updatedAt;
       run.lastObservation = time;
       for (const player of players.filter(p => p.status === 'mapped')) {
-        if (run.participants.length >= 2 || run.participants.some(p => p.uuid === player.uuid)) continue;
+        if (run.participants.some(p => p.uuid === player.uuid)) continue;
+        if (run.participants.length >= 2) { spectators.add(player.uuid); continue; }
         run.participants.push({ uuid: player.uuid, name: player.name, joinedAt: time, lastAt: time, last: null, absentSince: null, uncertainSince: null, finished: false, gap: true });
         db.prepare('INSERT INTO run_participants VALUES(?,?,?)').run(run.id, player.uuid, player.name);
       }

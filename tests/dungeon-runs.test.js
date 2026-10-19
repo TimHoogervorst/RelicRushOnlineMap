@@ -85,6 +85,32 @@ test('re-entry cancels absence; finalized players and third arrivals cannot join
   } finally { db.close(); }
 });
 
+test('spectators cannot replace missing runners, trigger encounters, or start recordings after runners leave', () => {
+  const db = openProject(':memory:');
+  try {
+    const a = player('a'.repeat(32), 20), b = player('b'.repeat(32), 20), c = player('c'.repeat(32));
+    const first = observe(db, 1000, [b]);
+    observe(db, 2000, [a, c, b]);
+    assert.deepEqual(activeRun(db).participants.map(p => p.uuid), [b.uuid, a.uuid]);
+    observe(db, 3000, [c]);
+    observe(db, 4000, [c]);
+    assert.equal(activeRun(db).id, first.id);
+    observe(db, 5000, [c, { ...a, status: 'outside' }, { ...b, status: 'outside' }]);
+    assert.equal(activeRun(db), null);
+    assert.equal(observe(db, 6000, [c]), null);
+    observe(db, 7000, []);
+    assert.equal(observe(db, 8000, [c]), null, 'invisibility does not promote spectators');
+    const detail = runDetail(db, first.id);
+    assert.deepEqual(detail.participants.map(p => p.uuid), [b.uuid, a.uuid]);
+    assert.ok(detail.samples.every(p => p.uuid !== c.uuid));
+    assert.equal(detail.encounters.length, 0);
+    assert.equal(db.prepare('SELECT count(*) n FROM run_participants WHERE uuid=?').get(c.uuid).n, 0);
+    assert.ok(!db.prepare('SELECT state FROM dungeon_runs WHERE id=?').get(first.id).state.includes(c.uuid));
+    observe(db, 9000, [{ ...c, status: 'outside' }]);
+    assert.equal(observe(db, 10000, [c]).participants[0].uuid, c.uuid, 'a new visit can join as a runner');
+  } finally { db.close(); }
+});
+
 test('outages preserve absence and ambiguity interrupts after 60 seconds without fabricating deaths', () => {
   const db = openProject(':memory:');
   try {
@@ -174,6 +200,27 @@ test('recorder polls without browser requests and restart/restore recovery prese
   time = 3000; const restarted = createRunRecorder(options); await restarted.tick();
   db = openProject(database); assert.equal(runDetail(db, original).status, 'interrupted'); assert.notEqual(activeRun(db).id, original); db.close();
   await recorder.stop(); await restarted.stop();
+});
+
+test('recorder retains spectator roles across database connections without persisting them', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rr-spectators-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const database = path.join(dir, 'project.sqlite');
+  const a = player(), b = player('b'.repeat(32)), c = player('c'.repeat(32));
+  let time = 1000, observations = [a, b, c];
+  const recorder = createRunRecorder({ database, manifest: async () => manifest, now: () => time,
+    tracker: { async snapshot() { return { updatedAt: time, observations, stale: false }; } },
+    onError: (_, error) => { throw error; } });
+  await recorder.tick();
+  time = 2000; observations = [{ ...a, status: 'outside' }, { ...b, status: 'outside' }, c];
+  await recorder.tick();
+  time = 3000; observations = [c]; await recorder.tick();
+  const db = openProject(database);
+  try {
+    assert.equal(activeRun(db), null);
+    assert.equal(db.prepare('SELECT count(*) n FROM dungeon_runs').get().n, 1);
+    assert.equal(db.prepare('SELECT count(*) n FROM run_samples WHERE uuid=?').get(c.uuid).n, 0);
+  } finally { db.close(); await recorder.stop(); }
 });
 
 test('public history API, authenticated deletion, head lookup, and full backup restore', async t => {

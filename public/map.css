@@ -188,6 +188,8 @@ button:focus-visible, select:focus-visible { outline: 2px solid #b8d597; outline
 #run-routes .run-route-glow { stroke: #ffd9b1; stroke-width: 10; opacity: .55; filter: drop-shadow(0 0 4px #ff6d58); }
 #run-routes .run-route-outline { stroke: #241c19; stroke-width: 6; }
 #run-routes .run-route-line { stroke: #ff7968; stroke-width: 3; }
+#run-routes .run-route-glow.run-player-two { stroke: #b5dcff; filter: drop-shadow(0 0 4px #428bff); }
+#run-routes .run-route-line.run-player-two { stroke: #459cff; }
 #run-annotations { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
 .run-annotation { position: absolute; display: flex; align-items: center; gap: 5px; transform-origin: 0 0; color: #f9e9d3; white-space: nowrap; font: 11px 'DM Mono', monospace; }
 .run-annotation-icon { width: 28px; height: 28px; line-height: 24px; box-sizing: border-box; text-align: center; flex: none; background: #201d1bee; border: 2px solid #e9c58c; border-radius: 50%; font-size: 21px; font-weight: bold; box-shadow: 0 0 8px #171d1b; }
